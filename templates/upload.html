@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Upload Artifact</h2>
+<form method="POST" action="/upload" enctype="multipart/form-data" class="mt-3">
+  <div class="mb-3">
+    <input type="file" name="file" class="form-control">
+  </div>
+  <button type="submit" class="btn btn-success">Upload</button>
+</form>
+{% endblock %}
