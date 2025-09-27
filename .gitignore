@@ -1,18 +1,58 @@
+# ===============================
+# Python cache / build / env
+# ===============================
+__pycache__/
+*.pyc
 *.pyo
 *.pyd
 *.log
-.DS_Store
+*.sqlite3
+*.db
+*.db-journal
 
-# virtualenv
+# Virtual environment
 venv/
-.env
+.env/
 
-# local data and artifacts
+# ===============================
+# OS junk files
+# ===============================
+.DS_Store
+Thumbs.db
+
+# ===============================
+# Evidence & artifacts (sensitive!)
+# ===============================
 evidence/
 data/triage.db
-*.db
-*.sqlite3
+data/*.db
+data/*.sqlite3
 
-# Python caches
-__pycache__/
-*.pyc
+# ===============================
+# Demo/test files
+# ===============================
+*_demo.py
+test_*.py
+triple_demo.py
+sandbox_*.py
+
+# ===============================
+# Reports / Generated files
+# ===============================
+*.pdf
+*.html
+reports/
+output/
+
+
+
+
+# Ignore triple demo/test files
+*_demo.py
+triple_demo.*
+male_triple_demo.py
+
+# Ignore only specific demo files
+male_triple_demo.py
+triple_demo.exe
+invoice.pdf.exe
