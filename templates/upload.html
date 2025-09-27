@@ -1,10 +1,25 @@
 {% extends "base.html" %}
 {% block content %}
 <h2>Upload Artifact</h2>
+
+<p class="text-muted">Use this form to upload evidence artifacts. For demo, use case id <code>case001</code>.</p>
+
 <form method="POST" action="/upload" enctype="multipart/form-data" class="mt-3">
   <div class="mb-3">
+    <label class="form-label">Case ID</label>
+    <input type="text" name="case_id" class="form-control" placeholder="case001" value="case001">
+  </div>
+
+  <div class="mb-3">
+    <label class="form-label">Uploader (investigator)</label>
+    <input type="text" name="uploader" class="form-control" placeholder="investigator" value="investigator">
+  </div>
+
+  <div class="mb-3">
+    <label class="form-label">Artifact file</label>
     <input type="file" name="file" class="form-control">
   </div>
-  <button type="submit" class="btn btn-success">Upload</button>
+
+  <button type="submit" class="btn btn-success">Upload Artifact</button>
 </form>
 {% endblock %}

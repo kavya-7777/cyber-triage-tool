@@ -1,6 +1,228 @@
 {% extends "base.html" %}
 {% block content %}
-<h2>Dashboard</h2>
-<p>Suspicion Score: <span class="badge bg-danger">{{ suspicion_score }}%</span></p>
-<p>Artifacts uploaded will be listed here.</p>
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h2>Dashboard — Case: <small class="text-muted">{{ case_id }}</small></h2>
+  <div>
+    <a href="{{ url_for('report') }}?case_id={{ case_id }}" class="btn btn-outline-primary me-2">Report Preview</a>
+    <a href="{{ url_for('api_manifest', case_id=case_id) }}" class="btn btn-outline-secondary">Manifest (JSON)</a>
+  </div>
+</div>
+
+<div class="row mb-4">
+  <div class="col-md-4">
+    <div class="card">
+      <div class="card-body">
+        <h6 class="card-subtitle mb-2 text-muted">Artifacts</h6>
+        <h3>{{ artifact_count }}</h3>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-4">
+    <div class="card">
+      <div class="card-body">
+        <h6 class="card-subtitle mb-2 text-muted">Suspicion Score (case)</h6>
+
+        {# compute best (max) score among artifacts: try final_score, fall back to suspicion_score/heuristics #}
+        {% set ns = namespace(scores=[]) %}
+        {% for art in artifacts %}
+          {% set a = art.analysis if art.analysis is not none else (art.get('analysis') if art.get('analysis') is defined else None) %}
+          {% if a %}
+            {% if a.final_score is defined %}
+              {% set ns.scores = ns.scores + [a.final_score] %}
+            {% elif a.suspicion_score is defined %}
+              {% set ns.scores = ns.scores + [a.suspicion_score] %}
+            {% elif a.get('heuristics') and a.heuristics.suspicion_score is defined %}
+              {% set ns.scores = ns.scores + [a.heuristics.suspicion_score] %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+
+        {% if ns.scores and ns.scores|length > 0 %}
+          {% set case_score = ns.scores|max %}
+          <h3><span class="badge bg-danger">{{ case_score }}%</span></h3>
+        {% else %}
+          <h3><span class="text-muted">—</span></h3>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<h5 class="mt-3">Artifacts list</h5>
+
+{% if artifacts and artifacts|length > 0 %}
+  <div class="table-responsive">
+    <table class="table table-striped table-sm align-middle">
+      <thead>
+        <tr>
+          <th>Artifact ID</th>
+          <th>Filename</th>
+          <th>Uploaded By</th>
+          <th>Uploaded At (UTC)</th>
+          <th>Size (bytes)</th>
+          <th>Analysis</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in artifacts %}
+          {% set aid = a.artifact_id %}
+          <tr>
+            <td style="font-family:monospace">{{ aid }}</td>
+            <td>{{ a.original_filename }}</td>
+            <td>{{ a.uploaded_by }}</td>
+            <td>{{ a.uploaded_at }}</td>
+            <td>{{ a.size_bytes }}</td>
+            <td>
+              {% set analysis = a.analysis if a.analysis is not none else (a.get('analysis') if a.get('analysis') is defined else None) %}
+              {% if analysis %}
+                <div>
+                  {# Preferred final score (scoring engine) -> fallback to older heuristics keys #}
+{% set final = None %}
+{% if analysis %}
+  {% if analysis.final_score is defined %}
+    {% set final = analysis.final_score %}
+  {% elif analysis.suspicion_score is defined %}
+    {% set final = analysis.suspicion_score %}
+  {% elif analysis.get('heuristics') and analysis.heuristics.suspicion_score is defined %}
+    {% set final = analysis.heuristics.suspicion_score %}
+  {% endif %}
+{% endif %}
+
+{% if final is not none %}
+  <span class="badge bg-danger me-1">Score: {{ final }}</span>
+{% endif %}
+
+
+                  {# IOC matches summary #}
+                  {% set ioc_matches = analysis.ioc_matches if analysis.ioc_matches is defined else (analysis.get('ioc_matches') if analysis.get('ioc_matches') is defined else []) %}
+                  {% if ioc_matches and ioc_matches|length > 0 %}
+                    <button class="btn btn-sm btn-outline-warning me-1" type="button" data-bs-toggle="collapse" data-bs-target="#ioc-{{ aid }}" aria-expanded="false" aria-controls="ioc-{{ aid }}">
+                      IOC ({{ ioc_matches|length }})
+                    </button>
+                  {% endif %}
+
+                  {# YARA matches summary #}
+                  {% set yara_matches = analysis.yara_matches if analysis.yara_matches is defined else (analysis.get('yara_matches') if analysis.get('yara_matches') is defined else []) %}
+                  {% if yara_matches and yara_matches|length > 0 %}
+                    <button class="btn btn-sm btn-outline-danger me-1" type="button" data-bs-toggle="collapse" data-bs-target="#yara-{{ aid }}" aria-expanded="false" aria-controls="yara-{{ aid }}">
+                      YARA ({{ yara_matches|length }})
+                    </button>
+                  {% endif %}
+
+                                    {# Heuristics summary #}
+                  {% set heur = analysis.heuristics if analysis.heuristics is defined else (analysis.get('heuristics') if analysis.get('heuristics') is defined else None) %}
+                  {% if heur %}
+                    <div class="mt-1">
+                      <span class="badge bg-info me-1">Heuristics: {{ heur.suspicion_score }}/100</span>
+                      {% if heur.reasons and heur.reasons|length > 0 %}
+                        <button class="btn btn-sm btn-outline-info" type="button"
+                                data-bs-toggle="collapse" data-bs-target="#heur-{{ aid }}"
+                                aria-expanded="false" aria-controls="heur-{{ aid }}">
+                          Reasons ({{ heur.reasons|length }})
+                        </button>
+                      {% endif %}
+                    </div>
+                    {% if heur.reasons and heur.reasons|length > 0 %}
+                      <div class="collapse mt-2" id="heur-{{ aid }}">
+                        <div class="card card-body py-2">
+                          <strong>Heuristic Flags</strong>
+                          <ul class="mb-0 small">
+                            {% for r in heur.reasons %}
+                              <li>{{ r }}</li>
+                            {% endfor %}
+                          </ul>
+                          <div class="mt-2 small text-muted">
+                            Entropy: {{ '%.2f'|format(heur.entropy) }} ({{ heur.entropy_level }})
+                          </div>
+                        </div>
+                      </div>
+                    {% endif %}
+                  {% endif %}
+
+                  {% if analysis and analysis.final_reasons %}
+  <div class="mt-1 small text-muted">Top reasons:
+    {{ analysis.final_reasons[:3] | join(', ') }}
+    {% if analysis.final_reasons|length > 3 %}...{% endif %}
+  </div>
+{% endif %}
+
+
+                  {# Quick fallback text when nothing matches but analysis exists #}
+                  {% if (not ioc_matches or ioc_matches|length == 0) and (not yara_matches or yara_matches|length == 0) %}
+                    <span class="text-muted">No IOC/YARA hits — has analysis</span>
+                  {% endif %}
+                </div>
+
+                {# Collapsible IOC details #}
+                {% if ioc_matches and ioc_matches|length > 0 %}
+                  <div class="collapse mt-2" id="ioc-{{ aid }}">
+                    <div class="card card-body py-2">
+                      <strong>IOC Matches</strong>
+                      <ul class="mb-0">
+                        {% for m in ioc_matches %}
+                          <li>
+                            <small class="text-muted">{{ m.type }}:</small>
+                            <span class="ms-1">{{ m.value }}</span>
+                            {% if m.get('ioc') %}<span class="badge bg-secondary ms-2">IOC: {{ m.ioc }}</span>{% endif %}
+                          </li>
+                        {% endfor %}
+                      </ul>
+                    </div>
+                  </div>
+                {% endif %}
+
+                {# Collapsible YARA details #}
+                {% if yara_matches and yara_matches|length > 0 %}
+                  <div class="collapse mt-2" id="yara-{{ aid }}">
+                    <div class="card card-body py-2">
+                      <strong>YARA Matches</strong>
+                      <ul class="mb-0">
+                        {% for y in yara_matches %}
+                          <li class="mb-1">
+                            <div><strong>Rule:</strong> {{ y.rule or y.get('rule') }}</div>
+                            {% if y.tags and y.tags|length > 0 %}
+                              <div><small class="text-muted">Tags:</small> <span class="ms-1">{{ y.tags|join(', ') }}</span></div>
+                            {% endif %}
+                            {% if y.strings and y.strings|length > 0 %}
+                              <details class="mt-1">
+                                <summary class="small">Matched strings ({{ y.strings|length }})</summary>
+                                <ul class="small mb-0">
+                                  {% for s in y.strings %}
+                                    <li><code>{{ s.match or s.get('match') or s.get('raw') }}</code></li>
+                                  {% endfor %}
+                                </ul>
+                              </details>
+                            {% endif %}
+                          </li>
+                        {% endfor %}
+                      </ul>
+                    </div>
+                  </div>
+                {% endif %}
+
+              {% else %}
+                <span class="text-muted">Pending analysis</span>
+              {% endif %}
+            </td>
+
+            <td>
+              {% if a.saved_filename %}
+                <a class="btn btn-sm btn-outline-primary" href="{{ url_for('download_artifact', case_id=case_id, artifact_filename=a.saved_filename) }}">Download</a>
+              {% endif %}
+              <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('api_manifest', case_id=case_id) }}#{{ a.artifact_id }}">Manifest</a>
+              <a class="btn btn-sm btn-outline-info" href="{{ url_for('api_ioc_check', case_id=case_id, artifact_id=a.artifact_id) }}">Re-run IOC</a>
+              <a class="btn btn-sm btn-outline-danger" href="{{ url_for('api_yara_check', case_id=case_id, artifact_id=a.artifact_id) }}">Re-run YARA</a>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% else %}
+  <div class="alert alert-warning">No artifacts found for this case. Upload one from the <a href="{{ url_for('home') }}">Upload page</a>.</div>
+{% endif %}
+
 {% endblock %}

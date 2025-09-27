@@ -1,7 +1,10 @@
-rule RansomwareCheck {
-    strings:
-        $a1 = "This computer has been locked"
-        $a2 = "Decrypt files with key"
-    condition:
-        any of ($a*)
+rule Contains_evil_string
+{
+  meta:
+    author = "team"
+    purpose = "demo"
+  strings:
+    $s1 = "evil" nocase
+  condition:
+    $s1
 }
