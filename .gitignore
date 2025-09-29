@@ -6,11 +6,13 @@ __pycache__/
 *.pyo
 *.pyd
 *.log
+
+# Databases
 *.sqlite3
 *.db
 *.db-journal
 
-# Virtual environment
+# Virtual environments
 venv/
 .env/
 
@@ -27,14 +29,17 @@ evidence/
 data/triage.db
 data/*.db
 data/*.sqlite3
+data/*/processes.csv
+data/*/events.json
+data/*/timeline.json
 
 # ===============================
-# Demo/test files
+# Demo / test files
 # ===============================
 *_demo.py
 test_*.py
-triple_demo.py
 sandbox_*.py
+
 
 # ===============================
 # Reports / Generated files
@@ -43,16 +48,4 @@ sandbox_*.py
 *.html
 reports/
 output/
-
-
-
-
-# Ignore triple demo/test files
-*_demo.py
-triple_demo.*
-male_triple_demo.py
-
-# Ignore only specific demo files
-male_triple_demo.py
-triple_demo.exe
-invoice.pdf.exe
+backups/

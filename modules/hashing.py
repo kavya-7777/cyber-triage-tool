@@ -94,7 +94,7 @@ def update_artifact_hash(case_id, artifact_id, sha256_hex):
 
     # 3) Update DB Artifact.analysis JSON (store/merge sha256)
     try:
-        artifact = Artifact.query.filter_by(artifact_id=artifact_id).first()
+        artifact = Artifact.query.filter_by(artifact_id=artifact_id, case_id=case_id).first()
         if artifact:
             existing = {}
             if artifact.analysis:

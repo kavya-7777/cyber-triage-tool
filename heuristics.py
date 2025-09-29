@@ -1,69 +1,65 @@
+# heuristics.py
 """
-heuristics.py
-
 Refined heuristic anomaly checks for Cyber Triage Tool.
 
-Features:
- - Streaming Shannon entropy calculation for files (works on arbitrarily large files)
- - Printable-byte ratio and top byte frequency diagnostics
- - Suspicious filename & path heuristics (double extensions, random-looking names, temp/download paths, long hex sequences)
- - Best-effort "unsigned executable" check for PE files using `pefile` if available (falls back gracefully)
- - Tunable scoring function that returns both component scores and final suspicion_score (0..100)
- - analyze_file(path) -> dict with metrics, flags, reasons, breakdown and suspicion_score
- - CLI: scan single file or recursively scan directories and print JSON reports
-
-Usage:
-    from heuristics import analyze_file
-    r = analyze_file("evidence/case001/artifacts/abcd__invoice.pdf.exe")
+Improvements added:
+ - Normalizes paths to forward slashes for consistent pattern matching.
+ - Single-pass entropy + printable/top-byte computation to avoid double-reading large files.
+ - Top-byte output now includes both integer and hex string.
+ - check_pe_signed() checks DIRECTORY_ENTRY_SECURITY and DATA_DIRECTORY entries.
+ - analyze_file() gains optional compute_entropy and max_entropy_bytes to limit work.
+ - Precompile suspicious path regexes at module-load for speed and correctness.
+ - Proper resource cleanup (pe.close()) and lightweight logging.
+ - More robust error fields in returned report so UI can show why something is unknown.
 """
-
 from __future__ import annotations
 import os
 import math
 import json
 import re
 import argparse
+import logging
 from collections import defaultdict, Counter
 from typing import Tuple, Dict, Any, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------
 # Tunables & thresholds
 # ---------------------------
-
-# Entropy thresholds (bits per byte)
 ENTROPY_THRESHOLD = 7.2
 ENTROPY_WARNING_THRESHOLD = 6.5
 
-# Filename heuristics
 FILENAME_CHAR_ENTROPY_THRESHOLD = 3.8
 MAX_FILENAME_LEN = 80
 HEXSEQ_RE = re.compile(r'[0-9A-Fa-f]{6,}')
 
-# Suspicious extensions / directory patterns
-SUSPICIOUS_EXTENSIONS = {'.exe', '.scr', '.bat', '.cmd', '.vbs', '.js', '.jar', '.ps1', '.dll', '.sys'}
+# Use forward-slash forms in patterns for easier normalization
 SUSPICIOUS_DIR_PATTERNS = [
-    r'\\temp\\', r'\\tmp\\', r'/tmp/', r'\\appdata\\', r'\\local\\temp',
-    r'/var/tmp', r'/home/.*/Downloads', r'/home/.*/\.cache', r'\\windows\\temp\\',
+    r'/temp/', r'/tmp/', r'/appdata/', r'/local/temp/',
+    r'/var/tmp', r'/home/.*/downloads', r'/home/.*/\.cache', r'/windows/temp/',
 ]
+
+# compile these once for speed
+try:
+    SUSPICIOUS_DIR_PATTERNS_COMPILED = [re.compile(p, flags=re.IGNORECASE) for p in SUSPICIOUS_DIR_PATTERNS]
+except re.error:
+    SUSPICIOUS_DIR_PATTERNS_COMPILED = []
 
 DOUBLE_EXT_RE = re.compile(r'\.[a-zA-Z0-9]{1,6}\.[a-zA-Z0-9]{1,6}$')
 
-# Byte diagnostics
 TOP_N_BYTES = 5
-PRINTABLE_RATIO_CHUNK = 65536  # used to compute printable ratio in streaming
+PRINTABLE_RATIO_CHUNK = 65536  # sample bytes for printable ratio
 
-# Scoring weights (tune these to favor IOC/YARA/heuristics in a scoring engine)
 WEIGHTS = {
-    "entropy": 0.45,       # entropy-based weight
-    "filename": 0.30,      # filename/path related signals
-    "pe_unsigned": 0.25    # unsigned PE signal
+    "entropy": 0.45,
+    "filename": 0.30,
+    "pe_unsigned": 0.25
 }
-# The final suspicion_score is scaled to 0..100 after applying these weights.
 
 # ---------------------------
 # Core helpers
 # ---------------------------
-
 def shannon_entropy_from_counts(counts: List[int], length: int) -> float:
     if length <= 0:
         return 0.0
@@ -75,45 +71,65 @@ def shannon_entropy_from_counts(counts: List[int], length: int) -> float:
         ent -= p * math.log2(p)
     return ent
 
-def compute_file_entropy(path: str, chunk_size: int = 65536) -> float:
-    """Streaming Shannon entropy (bits per byte)."""
+
+def compute_entropy_and_printable(path: str,
+                                  chunk_size: int = 65536,
+                                  sample_bytes: int = PRINTABLE_RATIO_CHUNK,
+                                  max_entropy_bytes: Optional[int] = None
+                                  ) -> Dict[str, Any]:
+    """
+    Single-pass: compute byte-frequency counts (for entropy) up to max_entropy_bytes (None => whole file).
+    Also compute printable ratio over the first `sample_bytes`.
+    Returns: { entropy, printable_ratio, top_bytes, scanned_bytes }
+    top_bytes entries: { byte: int, hex: str, count: int }
+    """
     counts = [0] * 256
     total = 0
-    with open(path, 'rb') as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            total += len(chunk)
-            for b in chunk:
-                counts[b] += 1
-    return shannon_entropy_from_counts(counts, total)
+    printable_sample = 0
+    read_for_sample = 0
 
-def printable_ratio_and_top_bytes(path: str, sample_bytes: int = PRINTABLE_RATIO_CHUNK) -> Dict[str, Any]:
-    """
-    Compute printable ratio (ASCII printable fraction) and top N frequent bytes
-    using first `sample_bytes` bytes (or entire file if smaller).
-    """
-    total = 0
-    printable = 0
-    counts = Counter()
     try:
-        with open(path, 'rb') as f:
-            data = f.read(sample_bytes)
-            total = len(data)
-            if total == 0:
-                return {"printable_ratio": 0.0, "top_bytes": []}
-            for b in data:
-                counts[b] += 1
-                # ASCII printable approx: 32-126 (space..~)
-                if 32 <= b <= 126:
-                    printable += 1
-    except Exception:
-        return {"printable_ratio": 0.0, "top_bytes": []}
-    ratio = (printable / total) if total > 0 else 0.0
-    top = counts.most_common(TOP_N_BYTES)
-    top_bytes = [{"byte": tb, "count": cnt} for tb, cnt in top]
-    return {"printable_ratio": ratio, "top_bytes": top_bytes}
+        with open(path, 'rb') as fh:
+            while True:
+                if max_entropy_bytes is not None and total >= max_entropy_bytes:
+                    break
+                to_read = chunk_size
+                if max_entropy_bytes is not None:
+                    to_read = min(to_read, max_entropy_bytes - total)
+                    if to_read <= 0:
+                        break
+                chunk = fh.read(to_read)
+                if not chunk:
+                    break
+                for b in chunk:
+                    counts[b] += 1
+                prev_total = total
+                total += len(chunk)
+                if prev_total < sample_bytes:
+                    to_take = min(sample_bytes - prev_total, len(chunk))
+                    for b in chunk[:to_take]:
+                        if 32 <= b <= 126:
+                            printable_sample += 1
+                    read_for_sample += to_take
+    except Exception as e:
+        logger.debug("compute_entropy_and_printable read error on %s: %s", path, e)
+        return {"entropy": 0.0, "printable_ratio": 0.0, "top_bytes": [], "scanned_bytes": 0}
+
+    entropy = shannon_entropy_from_counts(counts, total)
+    top = sorted([(i, counts[i]) for i in range(256)], key=lambda x: -x[1])[:TOP_N_BYTES]
+    top_bytes = [{"byte": b, "hex": f"0x{b:02x}", "count": cnt} for b, cnt in top if cnt > 0]
+    printable_ratio = (printable_sample / read_for_sample) if read_for_sample > 0 else 0.0
+
+    return {"entropy": entropy, "printable_ratio": printable_ratio, "top_bytes": top_bytes, "scanned_bytes": total}
+
+
+def compute_file_entropy(path: str, chunk_size: int = 65536) -> float:
+    """
+    Backwards-compatible wrapper: compute full-file entropy.
+    """
+    res = compute_entropy_and_printable(path, chunk_size=chunk_size, sample_bytes=0, max_entropy_bytes=None)
+    return float(res.get("entropy", 0.0))
+
 
 def char_entropy(s: str) -> float:
     if not s:
@@ -131,61 +147,56 @@ def char_entropy(s: str) -> float:
 # ---------------------------
 # Filename & path heuristics
 # ---------------------------
-
 def suspicious_filename(path_or_name: str) -> Tuple[bool, List[str]]:
-    """
-    Evaluate the basename for suspicious patterns.
-    Returns (flag, reasons[]).
-    """
     reasons: List[str] = []
     name = os.path.basename(path_or_name or "")
     lower = name.lower()
 
-    # double extension (e.g. invoice.pdf.exe)
     if DOUBLE_EXT_RE.search(name):
         final_ext = os.path.splitext(name)[1].lower()
-        if final_ext in SUSPICIOUS_EXTENSIONS:
+        if final_ext in {'.exe', '.scr', '.bat', '.cmd', '.vbs', '.js', '.jar', '.ps1', '.dll', '.sys'}:
             reasons.append(f'double extension with executable ({name})')
 
-    # suspicious extension
     _, ext = os.path.splitext(name)
-    if ext.lower() in SUSPICIOUS_EXTENSIONS:
+    if ext.lower() in {'.exe', '.scr', '.bat', '.cmd', '.vbs', '.js', '.jar', '.ps1', '.dll', '.sys'}:
         reasons.append(f'suspicious extension "{ext}"')
 
-    # long filename
     if len(name) > MAX_FILENAME_LEN:
         reasons.append(f'very long filename ({len(name)} chars)')
 
-    # hex-like sequences
     if HEXSEQ_RE.search(name):
         reasons.append('contains long hex/hex-like sequence')
 
-    # high character entropy
     ch_ent = char_entropy(name)
     if ch_ent >= FILENAME_CHAR_ENTROPY_THRESHOLD:
         reasons.append(f'high filename entropy ({ch_ent:.2f})')
 
     return (len(reasons) > 0, reasons)
 
+
 def suspicious_path(path: str) -> Tuple[bool, List[str]]:
     reasons: List[str] = []
     if not path:
         return False, reasons
-    lower = path.replace('/', '\\').lower()
-    for pat in SUSPICIOUS_DIR_PATTERNS:
+
+    norm = path.replace('\\', '/').lower()
+
+    # Use the precompiled patterns
+    for pat in SUSPICIOUS_DIR_PATTERNS_COMPILED:
         try:
-            if re.search(pat, lower):
-                reasons.append(f'path matches suspicious pattern: {pat}')
-        except re.error:
+            if pat.search(norm):
+                reasons.append(f'path matches suspicious pattern: {pat.pattern}')
+        except Exception:
             continue
-    if 'downloads' in lower or '\\downloads' in lower:
+
+    if '/downloads' in norm:
         reasons.append('file in Downloads directory')
+
     return (len(reasons) > 0, reasons)
 
 # ---------------------------
 # PE checks
 # ---------------------------
-
 def is_pe_file(path: str) -> bool:
     try:
         with open(path, 'rb') as f:
@@ -194,67 +205,82 @@ def is_pe_file(path: str) -> bool:
     except Exception:
         return False
 
+
 def check_pe_signed(path: str) -> Dict[str, Optional[Any]]:
     """
     Best-effort check: returns {'signed': True/False/None, 'reason': str}
-    - None means unknown (pefile missing or parse error)
+    'None' indicates unknown (pefile missing or parse error).
     """
     try:
         import pefile
     except Exception:
         return {'signed': None, 'reason': 'pefile not installed - pip install pefile to enable PE signing checks'}
 
+    pe = None
     try:
         pe = pefile.PE(path, fast_load=True)
-        # Look for certificate table in data directories
-        data_dirs = getattr(pe.OPTIONAL_HEADER, 'DATA_DIRECTORY', []) or []
-        for dd in data_dirs:
-            name = getattr(dd, 'name', None)
-            if name and 'SECURITY' in name.upper():
-                size = getattr(dd, 'Size', None) or getattr(dd, 'Size', 0)
-                if size and size > 0:
-                    return {'signed': True, 'reason': f'certificate table present (size={size})'}
-                else:
-                    return {'signed': False, 'reason': 'certificate table present but size 0 (unsigned)'}
+        # some pefile versions expose DIRECTORY_ENTRY_SECURITY
+        try:
+            sec = getattr(pe, 'DIRECTORY_ENTRY_SECURITY', None)
+            if sec:
+                return {'signed': True, 'reason': 'certificate table present (DIRECTORY_ENTRY_SECURITY)'}
+        except Exception:
+            pass
+
+        # inspect DATA_DIRECTORY entries (robust fallback)
+        try:
+            dd_list = getattr(pe.OPTIONAL_HEADER, 'DATA_DIRECTORY', []) or []
+            for dd in dd_list:
+                name = getattr(dd, 'name', None)
+                size = getattr(dd, 'Size', None) if hasattr(dd, 'Size') else (getattr(dd, 'size', None) if hasattr(dd, 'size') else None)
+                if name and 'SECURITY' in str(name).upper():
+                    if size and int(size) > 0:
+                        return {'signed': True, 'reason': f'certificate table present (size={size})'}
+                    else:
+                        return {'signed': False, 'reason': 'certificate table present but size 0 (unsigned)'}
+        except Exception:
+            # fall through to "no security" case
+            pass
+
         # fallback: no cert table found
         return {'signed': False, 'reason': 'no security data directory found; likely unsigned'}
     except Exception as e:
+        logger.debug("pefile parsing failed for %s: %s", path, e)
         return {'signed': None, 'reason': f'error parsing PE: {e}'}
+    finally:
+        # try to clean up resources if available
+        try:
+            if pe is not None:
+                pe.close()
+        except Exception:
+            pass
 
 # ---------------------------
 # Scoring utilities
 # ---------------------------
-
 def _score_entropy(entropy: float) -> float:
-    """
-    Map entropy -> 0..100 (component). Strong signal if entropy >= ENTROPY_THRESHOLD.
-    """
     if entropy >= ENTROPY_THRESHOLD:
         return 100.0
     if entropy <= ENTROPY_WARNING_THRESHOLD:
-        # linear scaling from 0..warning_threshold
-        return max(0.0, (entropy / ENTROPY_WARNING_THRESHOLD) * 40.0)  # low signal under warning
-    # between warning and threshold -> scale 40..90
+        return max(0.0, (entropy / ENTROPY_WARNING_THRESHOLD) * 40.0)
     span = ENTROPY_THRESHOLD - ENTROPY_WARNING_THRESHOLD
     frac = (entropy - ENTROPY_WARNING_THRESHOLD) / (span if span > 0 else 1.0)
-    return 40.0 + frac * 50.0  # yields up to ~90; rest may be given by filename/pe_unsigned
+    return 40.0 + frac * 50.0
+
 
 def _score_filename_flags(fname_flag: bool, n_reasons: int) -> float:
-    """
-    0..100 where presence of several filename reasons increases signal.
-    """
     if not fname_flag:
         return 0.0
-    # base 40 + up to 60 depending on number of reasons (cap)
     return min(100.0, 40.0 + min(n_reasons, 4) * 15.0)
+
 
 def _score_pe_unsigned(unsigned_flag: Optional[bool]) -> float:
     if unsigned_flag is True:
         return 100.0
     if unsigned_flag is False:
         return 0.0
-    # None => unknown (pefile missing) -> moderate small signal
     return 20.0
+
 
 def clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
@@ -262,44 +288,61 @@ def clamp01(x: float) -> float:
 # ---------------------------
 # Main analyzer
 # ---------------------------
-
 def analyze_file(path: str,
                  entropy_threshold: float = ENTROPY_THRESHOLD,
-                 entropy_warning: float = ENTROPY_WARNING_THRESHOLD) -> Dict[str, Any]:
+                 entropy_warning: float = ENTROPY_WARNING_THRESHOLD,
+                 compute_entropy: bool = True,
+                 max_entropy_bytes: Optional[int] = None
+                 ) -> Dict[str, Any]:
     """
     Analyze a file and return a structured report.
 
-    Keys returned:
-    - path, filename, size, entropy, entropy_level
-    - printable_ratio (sample), top_bytes (sample)
-    - filename_suspicious, filename_reasons
-    - path_suspicious, path_reasons
-    - is_pe, pe_signed_check, unsigned_executable (True/False/None)
-    - component_scores: {entropy_component, filename_component, pe_component}
-    - suspicion_score: final integer 0..100
-    - reasons: list of human-readable reasons
+    Arguments:
+      - compute_entropy: when False, do a fast sample (no full-file entropy).
+      - max_entropy_bytes: if not None, limit entropy computation to this many bytes (approx).
     """
     report: Dict[str, Any] = {}
     report['path'] = path
     report['filename'] = os.path.basename(path)
 
-    # stat
     try:
         size = os.path.getsize(path)
     except Exception as e:
         report['error'] = f'unable to stat file: {e}'
+        logger.debug("analyze_file stat failed for %s: %s", path, e)
         return report
     report['size'] = size
 
-    # entropy
-    try:
-        ent = compute_file_entropy(path)
-    except Exception as e:
-        report['error'] = f'error computing entropy: {e}'
-        return report
-    report['entropy'] = ent
+    # entropy + printable/top-bytes - single pass when requested
+    if compute_entropy:
+        try:
+            ep = compute_entropy_and_printable(path, sample_bytes=PRINTABLE_RATIO_CHUNK, max_entropy_bytes=max_entropy_bytes)
+            ent = float(ep.get('entropy', 0.0))
+            printable_ratio = float(ep.get('printable_ratio', 0.0))
+            top_bytes = ep.get('top_bytes', [])
+            report['scanned_bytes'] = ep.get('scanned_bytes', 0)
+        except Exception as e:
+            report['error'] = f'error computing entropy: {e}'
+            logger.exception("error computing entropy for %s", path)
+            return report
+    else:
+        # lightweight: sample for printable/top-bytes, entropy set to 0
+        try:
+            with open(path, 'rb') as fh:
+                data = fh.read(PRINTABLE_RATIO_CHUNK)
+            printable = sum(1 for b in data if 32 <= b <= 126)
+            printable_ratio = (printable / len(data)) if data else 0.0
+            counts = Counter(data)
+            top = counts.most_common(TOP_N_BYTES)
+            top_bytes = [{"byte": tb, "hex": f"0x{tb:02x}", "count": cnt} for tb, cnt in top]
+            ent = 0.0
+            report['scanned_bytes'] = len(data)
+        except Exception as e:
+            report['error'] = f'error sampling file: {e}'
+            logger.debug("sampling failed for %s: %s", path, e)
+            return report
 
-    # entropy level
+    report['entropy'] = ent
     ent_level = 'normal'
     if ent >= entropy_threshold:
         ent_level = 'high'
@@ -307,11 +350,9 @@ def analyze_file(path: str,
         ent_level = 'warning'
     report['entropy_level'] = ent_level
 
-    # printable ratio and top bytes (sample)
-    pr = printable_ratio_and_top_bytes(path)
-    report.update(pr)
+    report['printable_ratio'] = printable_ratio
+    report['top_bytes'] = top_bytes
 
-    # filename/path heuristics
     fname_flag, fname_reasons = suspicious_filename(report['filename'])
     path_flag, path_reasons = suspicious_path(path)
     report['filename_suspicious'] = fname_flag
@@ -319,16 +360,13 @@ def analyze_file(path: str,
     report['path_suspicious'] = path_flag
     report['path_reasons'] = path_reasons
 
-    # PE checks
     pe = is_pe_file(path)
     report['is_pe'] = pe
     if pe:
         pe_info = check_pe_signed(path)
         unsigned_flag = None
-        if pe_info.get('signed') is False:
-            unsigned_flag = True
-        elif pe_info.get('signed') is True:
-            unsigned_flag = False
+        if isinstance(pe_info.get('signed'), bool):
+            unsigned_flag = (not pe_info.get('signed'))
         else:
             unsigned_flag = None
     else:
@@ -338,32 +376,28 @@ def analyze_file(path: str,
     report['pe_signed_check'] = pe_info
     report['unsigned_executable'] = unsigned_flag
 
-    # Build human reasons (dedupe while preserving order)
     reasons: List[str] = []
+
     def add_reason(r: str):
         if r not in reasons:
             reasons.append(r)
 
-    # entropy-related reasons
     if ent_level == 'high':
         add_reason(f'high entropy ({ent:.2f})')
     elif ent_level == 'warning':
         add_reason(f'moderate entropy ({ent:.2f})')
 
-    # filename/path reasons
     for r in fname_reasons:
         add_reason(r)
     for r in path_reasons:
         add_reason(r)
 
-    # PE reasons
     if unsigned_flag is True:
         add_reason('PE file appears unsigned')
     elif unsigned_flag is None and pe:
         add_reason('PE signature check unknown (pefile missing or parse error)')
 
-    # component scores
-    entropy_comp = _score_entropy(ent)          # 0..100
+    entropy_comp = _score_entropy(ent)
     filename_comp = _score_filename_flags(fname_flag, len(fname_reasons))
     pe_comp = _score_pe_unsigned(unsigned_flag)
 
@@ -373,12 +407,10 @@ def analyze_file(path: str,
         'pe_component': int(round(pe_comp))
     }
 
-    # combine with WEIGHTS into final 0..100
     try:
         w_ent = WEIGHTS.get("entropy", 0.45)
         w_fname = WEIGHTS.get("filename", 0.30)
         w_pe = WEIGHTS.get("pe_unsigned", 0.25)
-        # normalize components to 0..1
         comp = (
             (entropy_comp / 100.0) * w_ent +
             (filename_comp / 100.0) * w_fname +
@@ -388,7 +420,6 @@ def analyze_file(path: str,
     except Exception:
         final_score = int(round((entropy_comp + filename_comp + pe_comp) / 3.0))
 
-    # clamp
     final_score = max(0, min(100, final_score))
 
     report['reasons'] = reasons
@@ -399,7 +430,6 @@ def analyze_file(path: str,
 # ---------------------------
 # CLI support
 # ---------------------------
-
 def _scan_path(path: str, recursive: bool = False) -> List[Dict[str, Any]]:
     reports = []
     if os.path.isfile(path):
@@ -416,14 +446,25 @@ def _scan_path(path: str, recursive: bool = False) -> List[Dict[str, Any]]:
             break
     return reports
 
+
 def main(argv=None):
     p = argparse.ArgumentParser(description='Heuristic anomaly checks (entropy, filename, path, unsigned PE)')
     p.add_argument('path', help='file or directory to analyze')
     p.add_argument('-r', '--recursive', action='store_true', help='recurse directories')
+    p.add_argument('--fast', action='store_true', help='fast mode: skip full entropy computation')
+    p.add_argument('--max-bytes', type=int, help='limit bytes used for entropy computation (fast approximate)')
     p.add_argument('-o', '--output', help='output JSON file')
     args = p.parse_args(argv)
 
-    reports = _scan_path(args.path, recursive=args.recursive)
+    reports = []
+    if args.recursive:
+        reports = _scan_path(args.path, recursive=True)
+    else:
+        if os.path.isfile(args.path):
+            reports = [analyze_file(args.path, compute_entropy=not args.fast, max_entropy_bytes=args.max_bytes)]
+        else:
+            reports = _scan_path(args.path, recursive=False)
+
     out = json.dumps(reports, indent=2)
     if args.output:
         with open(args.output, 'w', encoding='utf-8') as fh:
@@ -432,5 +473,8 @@ def main(argv=None):
     else:
         print(out)
 
+
 if __name__ == '__main__':
+    # Simple logging setup for CLI use
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     main()

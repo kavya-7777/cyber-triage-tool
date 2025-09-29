@@ -1,5 +1,35 @@
-{% extends "base.html" %}
-{% block content %}
-<h2>Timeline</h2>
-<p>Timeline visualization will appear here.</p>
-{% endblock %}
+<!-- templates/timeline.html -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Case Timeline</title>
+  <style>
+    body { font-family: Inter, Roboto, Arial, sans-serif; margin: 20px; background:#fffef8; color:#1a202c; }
+    h1 { color: #1f3d2f; margin-bottom:10px; }
+    #timeline { margin-top: 12px; }
+    .event { border-left: 4px solid #2f855a; padding: 12px 16px; margin-bottom: 10px; background: #ffffff; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+    .ts { font-weight: 700; color: #2d3748; margin-bottom:6px; }
+    .meta { font-size: 0.9em; color: #4a5568; margin-bottom: 8px; }
+    pre { background: #f7fafc; padding: 8px; border-radius: 4px; overflow:auto; white-space: pre-wrap; word-break: break-word; }
+    .muted { color: #718096; font-size: 0.95em; }
+    .controls { margin-bottom: 12px; }
+  </style>
+</head>
+<body>
+  <script>
+const CASE_ID = "{{ case_id|default('') }}";
+</script>
+<script src="{{ url_for('static', filename='js/timeline.js') }}"></script>
+
+  <h1>Case Timeline</h1>
+  <div class="controls">
+    <span class="muted">
+      Merged view of events from <code>processes.csv</code> and <code>events.json</code>. 
+      Events without timestamps can be included by server-side option.
+    </span>
+  </div>
+  <div id="timeline">Loading timeline…</div>
+</body>
+</html>

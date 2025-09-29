@@ -1,5 +1,0 @@
-PID,Name,User,StartTime
-1012,explorer.exe,UserA,2025-09-25 09:12:01
-1034,chrome.exe,UserA,2025-09-25 09:14:10
-2045,evil.exe,Guest,2025-09-25 09:15:22
-2077,notepad.exe,UserA,2025-09-25 09:16:45

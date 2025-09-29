@@ -1,16 +1,151 @@
 {
+  "meta": {
+    "version": "2025-09-28-1",
+    "generated_by": "Cyber Triage Tool — IOC pack (demo)",
+    "description": "Enhanced IOC set for demo and testing. Contains safe/example entries and fields for confidence, tags, and short notes.",
+    "created_at": "2025-09-28"
+  },
+
   "hashes": [
-    "00979047eff88ef31a3279dc91bc28f2bbf9ff7f4672a98916b08f06da88ca7a",
-    "59b924ce8d73ad4573acf8f8b3260477f3adffae05b59de50162e4cb0b1d5e88"
+    {
+      "value": "00979047eff88ef31a3279dc91bc28f2bbf9ff7f4672a98916b08f06da88ca7a",
+      "type": "sha256",
+      "confidence": "high",
+      "tags": ["known-sample", "demo"],
+      "note": "Example SHA256 used for demo matches (ASCII or binary)."
+    },
+    {
+      "value": "59b924ce8d73ad4573acf8f8b3260477f3adffae05b59de50162e4cb0b1d5e88",
+      "type": "sha256",
+      "confidence": "high",
+      "tags": ["known-sample"],
+      "note": "Second example hash."
+    },
+    {
+      "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "type": "sha256",
+      "confidence": "low",
+      "tags": ["empty-hash"],
+      "note": "SHA256 of empty input — included to show handling of benign cases."
+    }
   ],
+
   "filenames": [
-    "evil.exe",
-    "triple_demo.exe"
+    {
+      "value": "evil.exe",
+      "confidence": "medium",
+      "tags": ["suspicious-filename", "demo"],
+      "note": "Exact filename match; useful for quick demo hits."
+    },
+    {
+      "value": "triple_demo.exe",
+      "confidence": "medium",
+      "tags": ["suspicious-filename"]
+    },
+    {
+      "value": "invoice.pdf.exe",
+      "confidence": "high",
+      "tags": ["double-extension", "social-engineering"],
+      "note": "Double extension pattern often used to trick users."
+    }
   ],
+
+  "filename_regex": [
+    {
+      "value": "\\.pdf\\.exe$",
+      "confidence": "high",
+      "tags": ["double-extension"],
+      "note": "Detects filenames that try to appear as PDFs but execute."
+    },
+    {
+      "value": "^[0-9a-f]{16,}\\.(exe|dll)$",
+      "confidence": "medium",
+      "tags": ["randomized-name"],
+      "note": "Common pattern for randomly-named payloads (hex-like names)."
+    }
+  ],
+
+  "extensions": [
+    ".exe",
+    ".dll",
+    ".scr",
+    ".js",
+    ".ps1"
+  ],
+
   "ips": [
-    "192.0.2.1"
+    {
+      "value": "192.0.2.1",
+      "confidence": "high",
+      "tags": ["c2-testnet"],
+      "note": "TEST-NET-1 address used for safe demo."
+    },
+    {
+      "value": "198.51.100.5",
+      "confidence": "medium",
+      "tags": ["suspicious"],
+      "note": "Sample testnet IP (TEST-NET-2); used in examples."
+    }
   ],
+
   "domains": [
-    "bad.example.com"
-  ]
+    {
+      "value": "bad.example.com",
+      "confidence": "high",
+      "tags": ["malicious-domain", "demo"],
+      "note": "Demo domain for testing domain substring matches."
+    },
+    {
+      "value": "updates-suspicious[.]site",
+      "confidence": "medium",
+      "tags": ["typo-squatting"],
+      "note": "Obfuscated form (square-bracket dots) sometimes used in listings."
+    }
+  ],
+
+  "urls": [
+    {
+      "value": "http://bad.example.com/payload",
+      "confidence": "high",
+      "tags": ["c2", "http"],
+      "note": "Example URL used for content-based matching in text files."
+    }
+  ],
+
+  "mutexes": [
+    {
+      "value": "Global\\evil_mutex_12345",
+      "confidence": "medium",
+      "tags": ["runtime-indicator"],
+      "note": "Example mutex name used by persistent samples; used for process-level triage."
+    }
+  ],
+
+  "registry_keys": [
+    {
+      "value": "HKCU\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Run\\\\evil_updater",
+      "confidence": "medium",
+      "tags": ["persistence"],
+      "note": "Common persistence key pattern."
+    }
+  ],
+
+  "yara_strings": [
+    {
+      "value": "EICAR",
+      "confidence": "low",
+      "tags": ["test-string"],
+      "note": "Simple string used in test files; include for demo scanning."
+    },
+    {
+      "value": "LoadLibraryA",
+      "confidence": "medium",
+      "tags": ["pe-import"],
+      "note": "Import name frequently appearing in injection/loader code; useful to surface in YARA rules."
+    }
+  ],
+
+  "notes": {
+    "usage": "This file is intended for demo/functional use. Real-world deployments should include vetted IOCs from trusted feeds and avoid publicizing operational addresses. Confidence values: high/medium/low. Tags help categorize indicators."
+  }
 }
