@@ -1,0 +1,6 @@
+{
+  "ioc": 0.40,
+  "yara": 0.30,
+  "heuristics": 0.25,
+  "reputation": 0.05
+}

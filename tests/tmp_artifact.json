@@ -1,0 +1,18 @@
+{
+  "artifact_id": "demo1",
+  "analysis": {
+    "ioc_matches": [
+      {"type":"hash", "value":"00979047eff88ef31a3279dc91bc28f2bbf9ff7f4672a98916b08f06da88ca7a"},
+      {"type":"ip", "value":"192.0.2.1"}
+    ],
+    "yara_matches": [
+      {"rule":"CT_Sample_SHA256_ASCII", "tags": ["demo"], "meta": {"severity": "critical"}},
+      {"rule":"CT_Possible_Packed_File", "tags": [], "meta": {"severity": "medium"}}
+    ],
+    "heuristics": {
+      "suspicion_score": 72,
+      "component_scores": {"entropy_component": 90, "filename_component": 30, "pe_component": 40},
+      "reasons": ["high entropy", "unsigned executable"]
+    }
+  }
+}

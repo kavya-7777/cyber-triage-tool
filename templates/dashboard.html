@@ -1,7 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-3">
-  <h2>Dashboard — Case: <small class="text-muted">{{ case_id }}</small></h2>
+  <div>
+    <h2>Dashboard — Case: <small class="text-muted">{{ case_id }}</small></h2>
+    <div class="small text-muted">Explainability: every score maps to component signals (IOC, YARA, Heuristics)</div>
+  </div>
+
   <div class="d-flex align-items-center">
     <div id="timeline-artifact-badge" class="me-3"></div>
     <div>
@@ -11,7 +15,9 @@
   </div>
 </div>
 
-{# Helper: pick badge class for a numeric score #}
+{# ------------------------
+   Helper: pick badge CSS for a numeric score
+   ------------------------ #}
 {% macro score_badge(score) -%}
   {%- set s = (score|default(0)|int) -%}
   {%- if s >= 70 -%}
@@ -24,8 +30,11 @@
   <span class="badge {{ cls }}">{{ s }}%</span>
 {%- endmacro %}
 
+{# ------------------------
+   Case summary row: artifact count + case suspicion score + active weights
+   ------------------------ #}
 <div class="row mb-4">
-  <div class="col-md-4">
+  <div class="col-md-3">
     <div class="card">
       <div class="card-body">
         <h6 class="card-subtitle mb-2 text-muted">Artifacts</h6>
@@ -34,12 +43,12 @@
     </div>
   </div>
 
-  <div class="col-md-4">
-    <div class="card">
+  <div class="col-md-5">
+    <div class="card h-100">
       <div class="card-body">
         <h6 class="card-subtitle mb-2 text-muted">Suspicion Score (case)</h6>
 
-        {# gather scores robustly using dict.get defaults #}
+        {# collect artifact final scores robustly #}
         {% set ns = namespace(scores=[]) %}
         {% for art in artifacts %}
           {% set analysis = art.analysis if art.analysis is not none else (art.get('analysis') if art.get('analysis') is defined else None) %}
@@ -53,31 +62,61 @@
 
         {% if ns.scores and ns.scores|length > 0 %}
           {% set case_score = ns.scores|max %}
-          <h3>{{ score_badge(case_score) }}</h3>
+          <div class="d-flex align-items-center">
+            <div class="me-3">{{ score_badge(case_score) }}</div>
+            <div class="flex-fill">
+              <div class="small text-muted">Case score = max(artifact scores) — expand artifacts to inspect why</div>
+            </div>
+          </div>
         {% else %}
           <h3><span class="text-muted">—</span></h3>
         {% endif %}
+
+        {# Show active weights (from first artifact analysis.weights or fallback to DEFAULT); nice to make scoring transparent #}
+{% set active_weights = None %}
+{% for art in artifacts %}
+  {% set a_analysis = art.analysis if art.analysis is not none else (art.get('analysis') if art.get('analysis') is defined else None) %}
+  {% if not active_weights and a_analysis and a_analysis is mapping and a_analysis.get('weights') %}
+    {% set active_weights = a_analysis.get('weights') %}
+  {% endif %}
+{% endfor %}
+        {% if not active_weights %}
+          {# fallback: show default weights matching modules/scoring.DEFAULT_WEIGHTS (explain in UI) #}
+          {% set active_weights = {'ioc': 0.40, 'yara': 0.30, 'heuristics': 0.30} %}
+        {% endif %}
+
+        <div class="mt-3 small">
+          <strong>Weights</strong>
+          <div class="d-flex gap-2 mt-1">
+            <span class="badge bg-secondary">IOC {{ (active_weights.ioc * 100)|round(0) }}%</span>
+            <span class="badge bg-secondary">YARA {{ (active_weights.yara * 100)|round(0) }}%</span>
+            <span class="badge bg-secondary">Heuristics {{ (active_weights.heuristics * 100)|round(0) }}%</span>
+          </div>
+          <div class="mt-2 text-muted small">Weights can be overridden via <code>data/weights.json</code>.</div>
+        </div>
+
       </div>
     </div>
   </div>
-  <!-- Case switcher -->
-<form id="case-switcher-form" class="d-inline-block mb-3" method="get" action="{{ url_for('dashboard') }}">
-  <label for="case-switcher" class="sr-only">Select case</label>
-  <div class="input-group" style="max-width:360px;">
-    <select id="case-switcher" name="case_id" class="form-select" onchange="document.getElementById('case-switcher-form').submit();">
-      {% if cases %}
-        {% for c in cases %}
-          <option value="{{ c.case_id }}" {% if c.case_id == case_id %}selected{% endif %}>{{ c.case_id }}</option>
-        {% endfor %}
-      {% else %}
-        <option value="{{ case_id }}" selected>{{ case_id }}</option>
-      {% endif %}
-    </select>
-    <button class="btn btn-outline-secondary" type="submit" title="Go">Go</button>
+
+  <div class="col-md-4">
+    {# Case switcher (unchanged) #}
+    <form id="case-switcher-form" class="d-inline-block mb-3" method="get" action="{{ url_for('dashboard') }}">
+      <label for="case-switcher" class="sr-only">Select case</label>
+      <div class="input-group" style="max-width:360px;">
+        <select id="case-switcher" name="case_id" class="form-select" onchange="document.getElementById('case-switcher-form').submit();">
+          {% if cases %}
+            {% for c in cases %}
+              <option value="{{ c.case_id }}" {% if c.case_id == case_id %}selected{% endif %}>{{ c.case_id }}</option>
+            {% endfor %}
+          {% else %}
+            <option value="{{ case_id }}" selected>{{ case_id }}</option>
+          {% endif %}
+        </select>
+        <button class="btn btn-outline-secondary" type="submit" title="Go">Go</button>
+      </div>
+    </form>
   </div>
-</form>
-
-
 </div>
 
 <h5 class="mt-3">Artifacts list</h5>
@@ -92,7 +131,7 @@
           <th>Uploaded By</th>
           <th>Uploaded At (UTC)</th>
           <th>Size (bytes)</th>
-          <th>Analysis</th>
+          <th>Analysis & Explainability</th>
           <th>Actions</th>
         </tr>
       </thead>
@@ -105,19 +144,20 @@
             <td>{{ a.uploaded_by }}</td>
             <td>{{ a.uploaded_at }}</td>
             <td>{{ a.size_bytes }}</td>
+
             <td>
-              {# get analysis safely; prefer dict-like shape #}
+              {# normalize analysis shape #}
               {% set analysis = a.analysis if a.analysis is not none else (a.get('analysis') if a.get('analysis') is defined else None) %}
 
               {% if analysis and analysis is mapping %}
-                {# compute final score (try final_score -> suspicion_score -> heuristics.suspicion_score) #}
+                {# final score preference chain #}
                 {% set final = analysis.get('final_score') or analysis.get('suspicion_score') or (analysis.get('heuristics') and analysis.get('heuristics', {}).get('suspicion_score')) %}
-                {% if final is not none %}
-                  {% set final_int = (final|int) %}
-                  <div class="mb-1 d-flex align-items-center">
-                    <div class="me-2">{{ score_badge(final_int) }}</div>
-                    <div class="flex-grow-1">
-                      <div class="progress" style="height:8px;">
+                {% set final_int = final|default(0)|int %}
+
+                <div class="mb-1 d-flex align-items-center">
+                  <div class="me-2">{{ score_badge(final_int) }}</div>
+                  <div class="flex-grow-1">
+                    <div class="progress" style="height:8px;">
   {% if final_int >= 70 %}
     <div class="progress-bar bg-danger" role="progressbar"
          data-width="{{ final_int }}"
@@ -136,36 +176,152 @@
   {% endif %}
 </div>
 
+                  </div>
+                </div>
+
+                {# Compact summary: IOC / YARA / Heuristics badges (counts) #}
+                {% set ioc_matches = analysis.get('ioc_matches', []) %}
+                {% set yara_matches = analysis.get('yara_matches', []) %}
+                {% set heur = analysis.get('heuristics') %}
+
+                <div class="mb-2">
+                  {% if ioc_matches and ioc_matches|length > 0 %}
+                    <span class="badge bg-warning text-dark me-1">IOC {{ ioc_matches|length }}</span>
+                  {% endif %}
+                  {% if yara_matches and yara_matches|length > 0 %}
+                    <span class="badge bg-danger me-1">YARA {{ yara_matches|length }}</span>
+                  {% endif %}
+                  {% if heur %}
+                    <span class="badge bg-info me-1">Heur {{ heur.get('suspicion_score', 'N/A') }}</span>
+                  {% endif %}
+                </div>
+
+                {# Why? button: build compact blob using namespace-based lists (safe Jinja) #}
+                {# build safe lists for ioc_matches and yara_matches using namespace and loops #}
+                {# Why? button: build compact blob using namespace-based lists (safe Jinja) #}
+                {# build safe lists for ioc_matches and yara_matches using namespace and loops #}
+                {% set _ns = namespace(iocs=[], yaras=[]) %}
+
+                {% for m in (analysis.get('ioc_matches') or []) %}
+                  {% if m is mapping %}
+                    {% set _mi = {
+                      "type": (m.get('type') if m.get('type') is defined else 'ioc'),
+                      "value": (m.get('value') if m.get('value') is defined else (m.get('ioc') if m.get('ioc') is defined else '')),
+                      "confidence": (m.get('confidence') if m.get('confidence') is defined else (m.get('ioc_confidence') if m.get('ioc_confidence') is defined else None)),
+                      "tags": (m.get('tags') if m.get('tags') is defined else [])
+                    } %}
+                  {% else %}
+                    {% set _mi = {"type": "ioc", "value": (m|string), "confidence": None, "tags": []} %}
+                  {% endif %}
+                  {# append by reassigning the list (no 'do' needed) #}
+                  {% set _ns.iocs = _ns.iocs + [_mi] %}
+                {% endfor %}
+
+                {% for y in (analysis.get('yara_matches') or []) %}
+                  {% if y is mapping %}
+                    {% set _yi = {
+                      "rule": (y.get('rule') if y.get('rule') is defined else (y.get('name') if y.get('name') is defined else '<unnamed>')),
+                      "tags": (y.get('tags') if y.get('tags') is defined else []),
+                      "meta": (y.get('meta') if y.get('meta') is defined else {})
+                    } %}
+                  {% else %}
+                    {% set _yi = {"rule": (y|string), "tags": [], "meta": {}} %}
+                  {% endif %}
+                  {% set _ns.yaras = _ns.yaras + [_yi] %}
+                {% endfor %}
+
+                {% set compact_blob = {
+                    "artifact_id": aid,
+                    "final_score": final_int,
+                    "weights": analysis.get('weights') or active_weights,
+                    "breakdown": analysis.get('breakdown') or analysis.get('final_breakdown') or analysis.get('components', {}),
+                    "reasons": analysis.get('reasons') or analysis.get('final_reasons') or [],
+                    "ioc_matches": _ns.iocs,
+                    "yara_matches": _ns.yaras,
+                    "heuristics": analysis.get('heuristics') or {}
+                  } %}
+
+                <div class="d-inline-block ms-2">
+                  <button class="btn btn-sm btn-outline-primary why-btn"
+                          type="button"
+                          data-artifact="{{ aid }}"
+                          data-analysis='{{ compact_blob|tojson|e }}'
+                          data-bs-toggle="modal"
+                          data-bs-target="#whyModal">
+                    Why?
+                  </button>
+                </div>
+
+                {# Inline small preview of top reasons (max 3) #}
+                {% if compact_blob.reasons and compact_blob.reasons|length > 0 %}
+                  <div class="mt-1 small text-muted">Top: {{ compact_blob.reasons[:3] | join(', ') }}{% if compact_blob.reasons|length > 3 %}...{% endif %}</div>
+                {% endif %}
+
+                {# Collapsible IOC details: include confidence & tags if present #}
+                {% if ioc_matches and ioc_matches|length > 0 %}
+                  <div class="collapse mt-2" id="ioc-{{ aid }}">
+                    <div class="card card-body py-2">
+                      <strong>IOC Matches</strong>
+                      <ul class="mb-0">
+                        {% for m in ioc_matches %}
+                          {% set m_type = (m.get('type') if m is mapping else 'ioc') %}
+                          {% set m_value = (m.get('value') if m is mapping else (m if m is string else '')) %}
+                          {% set m_conf = (m.get('confidence') if m is mapping else None) %}
+                          {% set m_tags = (m.get('tags') if m is mapping else []) %}
+                          <li class="mb-1">
+                            <small class="text-muted">{{ m_type }}:</small>
+                            <span class="ms-1">{{ m_value }}</span>
+                            {% if m_conf %}<span class="ms-2 badge bg-secondary small">conf: {{ m_conf }}</span>{% endif %}
+                            {% if m_tags and m_tags|length > 0 %}<div class="small text-muted mt-1">tags: {{ m_tags|join(', ') }}</div>{% endif %}
+                          </li>
+                        {% endfor %}
+                      </ul>
                     </div>
                   </div>
                 {% endif %}
 
-                {# IOC summary #}
-                {% set ioc_matches = analysis.get('ioc_matches', []) %}
-                {% if ioc_matches and ioc_matches|length > 0 %}
-                  <button class="btn btn-sm btn-outline-warning me-1" type="button" data-bs-toggle="collapse" data-bs-target="#ioc-{{ aid }}" aria-expanded="false" aria-controls="ioc-{{ aid }}">
-                    IOC ({{ ioc_matches|length }})
-                  </button>
-                {% endif %}
-
-                {# YARA summary #}
-                {% set yara_matches = analysis.get('yara_matches', []) %}
+                {# Collapsible YARA details: show meta.severity & tags #}
                 {% if yara_matches and yara_matches|length > 0 %}
-                  <button class="btn btn-sm btn-outline-danger me-1" type="button" data-bs-toggle="collapse" data-bs-target="#yara-{{ aid }}" aria-expanded="false" aria-controls="yara-{{ aid }}">
-                    YARA ({{ yara_matches|length }})
-                  </button>
+                  <div class="collapse mt-2" id="yara-{{ aid }}">
+                    <div class="card card-body py-2">
+                      <strong>YARA Matches</strong>
+                      <ul class="mb-0">
+                        {% for y in yara_matches %}
+                          {% set rule = (y.get('rule') if y is mapping else (y if y is string else '<unnamed>')) %}
+                          {% set tags = (y.get('tags') if y is mapping else []) %}
+                          {% set meta = (y.get('meta') if y is mapping else {}) %}
+                          <li class="mb-2">
+                            <div><strong>Rule:</strong> {{ rule }}</div>
+                            {% if meta and meta.severity is defined %}
+                              <div><small class="text-muted">Severity:</small> <span class="badge bg-{{ 'danger' if meta.severity in ['critical','high'] else 'warning' if meta.severity=='medium' else 'secondary' }}">{{ meta.severity }}</span></div>
+                            {% endif %}
+                            {% if tags and tags|length > 0 %}
+                              <div class="small text-muted">Tags: {{ tags|join(', ') }}</div>
+                            {% endif %}
+                            {% if y.get('strings') %}
+                              <details class="mt-1">
+                                <summary class="small">Matched strings ({{ y.get('strings')|length }})</summary>
+                                <ul class="small mb-0">
+                                  {% for s in y.get('strings') %}
+                                    <li><code>{{ s.get('match') or s.get('raw') or s }}</code></li>
+                                  {% endfor %}
+                                </ul>
+                              </details>
+                            {% endif %}
+                          </li>
+                        {% endfor %}
+                      </ul>
+                    </div>
+                  </div>
                 {% endif %}
 
-                {# Heuristics summary #}
-                {% set heur = analysis.get('heuristics') %}
+                {# Heuristics small preview (reasons + entropy) #}
                 {% if heur %}
-                  <div class="mt-1">
+                  <div class="mt-2">
                     <span class="badge bg-info me-1">Heuristics: {{ heur.get('suspicion_score', 'N/A') }}/100</span>
                     {% if heur.get('reasons') %}
-                      <button class="btn btn-sm btn-outline-info" type="button"
-                              data-bs-toggle="collapse" data-bs-target="#heur-{{ aid }}"
-                              aria-expanded="false" aria-controls="heur-{{ aid }}">
-                        Reasons ({{ heur.get('reasons')|length }})
+                      <button class="btn btn-sm btn-outline-info" type="button" data-bs-toggle="collapse" data-bs-target="#heur-{{ aid }}" aria-expanded="false" aria-controls="heur-{{ aid }}">
+                        Details ({{ heur.get('reasons')|length }})
                       </button>
                     {% endif %}
                   </div>
@@ -187,60 +343,6 @@
                   {% endif %}
                 {% endif %}
 
-                {% if analysis.get('final_reasons') %}
-                  <div class="mt-1 small text-muted">Top reasons:
-                    {{ analysis.get('final_reasons')[:3] | join(', ') }}
-                    {% if analysis.get('final_reasons')|length > 3 %}...{% endif %}
-                  </div>
-                {% endif %}
-
-                {% if (not ioc_matches or ioc_matches|length == 0) and (not yara_matches or yara_matches|length == 0) and (final is none) %}
-                  <span class="text-muted">Has analysis but no IOC/YARA/final score</span>
-                {% endif %}
-
-                {# collapsible IOC details #}
-                {% if ioc_matches and ioc_matches|length > 0 %}
-                  <div class="collapse mt-2" id="ioc-{{ aid }}">
-                    <div class="card card-body py-2">
-                      <strong>IOC Matches</strong>
-                      <ul class="mb-0">
-                        {% for m in ioc_matches %}
-                          <li><small class="text-muted">{{ m.get('type', 'ioc') }}:</small> <span class="ms-1">{{ m.get('value') or m }}</span></li>
-                        {% endfor %}
-                      </ul>
-                    </div>
-                  </div>
-                {% endif %}
-
-                {# collapsible YARA details #}
-                {% if yara_matches and yara_matches|length > 0 %}
-                  <div class="collapse mt-2" id="yara-{{ aid }}">
-                    <div class="card card-body py-2">
-                      <strong>YARA Matches</strong>
-                      <ul class="mb-0">
-                        {% for y in yara_matches %}
-                          <li class="mb-1">
-                            <div><strong>Rule:</strong> {{ y.get('rule') or y.get('name') or y.rule if y is mapping else y }}</div>
-                            {% if y.get('tags') %}
-                              <div><small class="text-muted">Tags:</small> <span class="ms-1">{{ y.get('tags')|join(', ') }}</span></div>
-                            {% endif %}
-                            {% if y.get('strings') %}
-                              <details class="mt-1">
-                                <summary class="small">Matched strings ({{ y.get('strings')|length }})</summary>
-                                <ul class="small mb-0">
-                                  {% for s in y.get('strings') %}
-                                    <li><code>{{ s.get('match') or s.get('raw') or s }}</code></li>
-                                  {% endfor %}
-                                </ul>
-                              </details>
-                            {% endif %}
-                          </li>
-                        {% endfor %}
-                      </ul>
-                    </div>
-                  </div>
-                {% endif %}
-
               {% else %}
                 <span class="text-muted">Pending analysis</span>
               {% endif %}
@@ -254,19 +356,68 @@
               <a class="btn btn-sm btn-outline-info" href="{{ url_for('api_ioc_check', case_id=case_id, artifact_id=a.artifact_id) }}">Re-run IOC</a>
               <a class="btn btn-sm btn-outline-danger" href="{{ url_for('api_yara_check', case_id=case_id, artifact_id=a.artifact_id) }}">Re-run YARA</a>
             </td>
-
-            
           </tr>
-
-
         {% endfor %}
       </tbody>
     </table>
   </div>
+
+  {# Short legend explaining confidence/severity/weights for judges #}
+  <div class="mt-3 small text-muted">
+    <strong>Legend:</strong>
+    <ul>
+      <li><strong>IOC confidence</strong> — source-level confidence (high/medium/low) from IOC feed.</li>
+      <li><strong>YARA severity</strong> — rule author severity (meta.severity) used to surface critical detections.</li>
+      <li><strong>Weights</strong> — control relative contribution of IOC/YARA/Heuristics to final score (editable via <code>data/weights.json</code>).</li>
+    </ul>
+  </div>
+
 {% else %}
   <div class="alert alert-warning">No artifacts found for this case. Upload one from the <a href="{{ url_for('home') }}">Upload page</a>.</div>
 {% endif %}
 
+{# ------------------------
+   Why? Modal (single global modal, populated dynamically)
+   ------------------------ #}
+<div class="modal fade" id="whyModal" tabindex="-1" aria-labelledby="whyModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="whyModalLabel">Why this score?</h5>
+        <button type="button" class="btn btn-sm btn-outline-secondary me-2" id="copyWhyBtn">Copy JSON</button>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body pb-3">
+        <div id="why-header" class="mb-3 d-flex align-items-center">
+          <h3 id="why-score" class="me-3" style="margin:0"></h3>
+          <div id="why-badge"></div>
+          <div class="ms-auto small text-muted" id="why-artifact-id"></div>
+        </div>
+
+        <div id="why-breakdown" class="mb-3">
+          <!-- Component bars (populated via JS) -->
+        </div>
+
+        <div id="why-details" class="mb-2">
+          <!-- Per-component collapsible details -->
+        </div>
+
+        <hr/>
+        <div>
+          <h6>Summary reasons</h6>
+          <ul id="why-reasons" class="small"></ul>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <small class="text-muted me-auto">Scores are deterministic and explainable — each point maps to a signal. See data/weights.json for weight config.</small>
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# include the enhanced artifacts loader JS which populates the modal #}
 <script src="{{ url_for('static', filename='js/artifacts_loader.js') }}"></script>
 <script>window.addEventListener('DOMContentLoaded', function(){ if(window.ArtifactsLoader) window.ArtifactsLoader.init("{{ case_id }}"); });</script>
 
