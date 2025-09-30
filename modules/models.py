@@ -71,3 +71,56 @@ class Artifact(db.Model):
             "duplicate_of": self.duplicate_of,
             "analysis": analysis_parsed
         }
+
+class ChainOfCustody(db.Model):
+    __tablename__ = "chain_of_custody"
+    id = db.Column(db.Integer, primary_key=True)
+    case_id = db.Column(db.String(100), nullable=False, index=True)
+    artifact_id = db.Column(db.String(64), nullable=False, index=True)
+    actor = db.Column(db.String(100))
+    action = db.Column(db.String(100))
+    from_entity = db.Column(db.String(255))
+    to_entity = db.Column(db.String(255))
+    reason = db.Column(db.String(255))
+    location = db.Column(db.String(255))
+    details = db.Column(db.Text, nullable=True)
+    signature = db.Column(db.String(256), nullable=True)
+    ts = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "case_id": self.case_id,
+            "artifact_id": self.artifact_id,
+            "actor": self.actor,
+            "action": self.action,
+            "from": self.from_entity,
+            "to": self.to_entity,
+            "reason": self.reason,
+            "location": self.location,
+            "details": json.loads(self.details) if self.details else None,
+            "signature": self.signature,
+            "ts": (self.ts.isoformat() + "Z") if self.ts else None
+        }
+
+# Add this class definition near the bottom of modules/models.py (after Artifact)
+class Audit(db.Model):
+    __tablename__ = "audits"
+    id = db.Column(db.Integer, primary_key=True)
+    ts = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    case_id = db.Column(db.String(100), nullable=True, index=True)
+    artifact_id = db.Column(db.String(64), nullable=True, index=True)
+    actor = db.Column(db.String(100), nullable=True)
+    action = db.Column(db.String(100), nullable=True)
+    details = db.Column(db.Text, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "ts": (self.ts.isoformat() + "Z") if self.ts else None,
+            "case_id": self.case_id,
+            "artifact_id": self.artifact_id,
+            "actor": self.actor,
+            "action": self.action,
+            "details": json.loads(self.details) if self.details else None
+        }

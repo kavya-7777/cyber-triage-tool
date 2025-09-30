@@ -1,10 +1,88 @@
 // static/js/artifacts_loader.js
 // Enhanced artifacts loader + "Why?" modal support
-// Improvements: safer JSON parsing, defensive DOM checks, truncation of long texts,
-// progress bar animation on modal open, debounce on clicks.
-//
-// Replace the existing file with this content.
+// OVERVIEW:
+// - Provides safeFetchJson / fetchJsonWrapped to avoid "body already read" issues.
+// - Provides robustUploadFormSubmit for use with your upload form (optional).
+// - Implements Why? modal population, Verify button handling, per-artifact & case-level CoC,
+//   progress bar animation, and tooltip initialization.
+// - Implements refreshCocSummaryForArtifact used after CoC add operations.
 
+"use strict";
+
+// ------- safe-response helpers -------
+async function safeFetchJson(resp) {
+  try {
+    return await resp.json();
+  } catch (err) {
+    try {
+      const clone = resp.clone();
+      const txt = await clone.text();
+      return JSON.parse(txt);
+    } catch (err2) {
+      try {
+        const txt2 = await resp.text();
+        return JSON.parse(txt2);
+      } catch (err3) {
+        const e = new Error("safeFetchJson: unable to parse response body as JSON");
+        e.originalErrors = [err, err2, err3];
+        throw e;
+      }
+    }
+  }
+}
+
+async function fetchJsonWrapped(url, opts) {
+  const resp = await fetch(url, opts);
+  let data = null;
+  try {
+    data = await safeFetchJson(resp);
+  } catch (e) {
+    return { ok: resp.ok, status: resp.status, data: null, parse_error: String(e) };
+  }
+  return { ok: resp.ok, status: resp.status, data: data };
+}
+// ------- end helpers -------
+
+
+// Robust upload helper you can wire to your upload form
+async function robustUploadFormSubmit(formEl) {
+  const formData = new FormData(formEl);
+  try {
+    const respWrapper = await fetchJsonWrapped(formEl.action || '/upload', {
+      method: 'POST',
+      body: formData
+    });
+
+    if (!respWrapper.ok) {
+      const payload = respWrapper.data;
+      console.debug('Upload failed status', respWrapper.status, payload, respWrapper.parse_error);
+      const errMsg = (payload && payload.error) ? payload.error : 'Upload failed';
+      alert('Upload failed: ' + errMsg);
+      return { ok: false, error: errMsg, payload: payload };
+    }
+
+    const payload = respWrapper.data;
+    console.debug('Upload success payload', payload);
+
+    // If you rely on a full reload to refresh server-state, uncomment:
+    // location.reload();
+
+    // Otherwise call the optional hook the app may provide
+    if (window.ArtifactsLoader && typeof window.ArtifactsLoader.onUploadSuccess === 'function') {
+      try { window.ArtifactsLoader.onUploadSuccess(payload); } catch (e) { console.error(e); }
+    }
+
+    return { ok: true, payload: payload };
+
+  } catch (e) {
+    console.error('robustUploadFormSubmit caught', e);
+    alert('Upload failed (client error). See console for details.');
+    return { ok: false, error: String(e) };
+  }
+}
+
+
+// ArtifactsLoader small module (keeps previous functionality)
 window.ArtifactsLoader = (function(){
   async function fetchCounts(caseId){
     try {
@@ -37,8 +115,10 @@ window.ArtifactsLoader = (function(){
     renderBadge(container, counts);
   }
 
-  return { init };
+  // Expose the upload helper in the loader for convenience
+  return { init, robustUploadFormSubmit };
 })();
+
 
 // -----------------------------
 // Modal & Why? helper script
@@ -46,7 +126,6 @@ window.ArtifactsLoader = (function(){
 (function(){
   // small utilities
   function escTextNode(parent, text) {
-    // insert text safely rather than setting innerHTML
     if (!parent) return;
     parent.textContent = (text === null || text === undefined) ? '' : String(text);
   }
@@ -82,7 +161,6 @@ window.ArtifactsLoader = (function(){
     if(!items || items.length === 0) return '';
     var out = '<div class="mb-2"><details><summary><strong>' + title + ' (' + items.length + ')</strong></summary><div class="mt-2"><ul class="small">';
     items.forEach(function(it){
-      // it may be dict-like or string
       if (typeof it === 'string') {
         out += '<li>' + escapeHtml(clampString(it, 300)) + '</li>';
       } else if (it && typeof it === 'object') {
@@ -114,7 +192,6 @@ window.ArtifactsLoader = (function(){
     if (navigator.clipboard && navigator.clipboard.writeText) {
       return navigator.clipboard.writeText(text);
     }
-    // fallback
     var ta = document.createElement('textarea');
     ta.value = text;
     ta.style.position = 'fixed';
@@ -141,7 +218,6 @@ window.ArtifactsLoader = (function(){
   // When a Why? button is clicked, populate modal
   document.addEventListener('click', withDebounce(function(ev){
     var t = ev.target;
-    // support clicks on child elements of the button
     var btn = t.closest ? t.closest('.why-btn') : null;
     if (!btn) return;
     var raw = btn.getAttribute('data-analysis');
@@ -154,7 +230,6 @@ window.ArtifactsLoader = (function(){
       return;
     }
 
-    // locate modal elements defensively
     var whyScoreEl = document.getElementById('why-score');
     var whyBadgeEl = document.getElementById('why-badge');
     var whyArtifactEl = document.getElementById('why-artifact-id');
@@ -164,26 +239,21 @@ window.ArtifactsLoader = (function(){
     var copyBtn = document.getElementById('copyWhyBtn');
 
     if (!whyScoreEl || !whyBadgeEl || !whyArtifactEl || !breakdownNode || !detailsNode || !reasonsNode) {
-      // If the modal isn't on the page, quietly return (helps tests)
       console.debug("Why modal elements not present; skipping modal population");
       return;
     }
 
-    // header
     var fs = analysis.final_score || analysis.suspicion_score || 0;
     escTextNode(whyScoreEl, fs);
     whyBadgeEl.innerHTML = formatBadge(Number(fs) || 0);
     escTextNode(whyArtifactEl, analysis.artifact_id || '');
 
-    // breakdown area
     breakdownNode.innerHTML = '';
     var comps = analysis.components || analysis.breakdown || {};
-    // Normalized keys may be nested; try to extract numeric scores
     var iocv = (comps.ioc && comps.ioc.score) || comps.ioc_component || comps.ioc || 0;
     var yarav = (comps.yara && comps.yara.score) || comps.yara_component || comps.yara || 0;
     var heurv = (comps.heuristics && comps.heuristics.score) || comps.heuristics_component || comps.heuristics || 0;
     var repv = (comps.reputation && comps.reputation.score) || comps.reputation_component || comps.reputation || 0;
-    // coerce to int
     iocv = parseInt(iocv) || 0; yarav = parseInt(yarav) || 0; heurv = parseInt(heurv) || 0; repv = parseInt(repv) || 0;
 
     breakdownNode.innerHTML += renderComponentRow('IOC', iocv);
@@ -191,13 +261,12 @@ window.ArtifactsLoader = (function(){
     breakdownNode.innerHTML += renderComponentRow('Heuristics', heurv);
     breakdownNode.innerHTML += renderComponentRow('Reputation', repv);
 
-    // details
     detailsNode.innerHTML = '';
     var compDetails = analysis.components_details || analysis.components || {};
     var iocMatchesList = (compDetails.ioc && compDetails.ioc.matches) ? compDetails.ioc.matches : (analysis.ioc_matches || []);
     var yaraMatchesList = (compDetails.yara && compDetails.yara.matches) ? compDetails.yara.matches : (analysis.yara_matches || []);
-    var heurList = (compDetails.heuristics && compDetails.heuristics.reasons) ? compDetails.heuristics.reasons : 
-                   ( (analysis.components && analysis.components.heuristics && analysis.components.heuristics.reasons) ? analysis.components.heuristics.reasons : (analysis.reasons || []) );
+    var heurList = (compDetails.heuristics && compDetails.heuristics.reasons) ? compDetails.heuristics.reasons :
+                   ((analysis.components && analysis.components.heuristics && analysis.components.heuristics.reasons) ? analysis.components.heuristics.reasons : (analysis.reasons || []));
     var repList = (compDetails.reputation && compDetails.reputation.reasons) ? compDetails.reputation.reasons : (analysis.reputation && analysis.reputation.reasons ? analysis.reputation.reasons : []);
 
     detailsNode.innerHTML += renderDetailsList('IOC matches', iocMatchesList);
@@ -205,7 +274,6 @@ window.ArtifactsLoader = (function(){
     detailsNode.innerHTML += renderDetailsList('Heuristics', heurList);
     detailsNode.innerHTML += renderDetailsList('Reputation notes', repList);
 
-    // summary reasons (text nodes to avoid HTML injection)
     reasonsNode.innerHTML = '';
     var reasons = analysis.reasons || analysis.final_reasons || [];
     reasons.forEach(function(r){
@@ -214,7 +282,6 @@ window.ArtifactsLoader = (function(){
       reasonsNode.appendChild(li);
     });
 
-    // set JSON copy button payload
     if (copyBtn) {
       copyBtn.onclick = function(){
         copyToClipboard(JSON.stringify(analysis, null, 2)).then(function(){
@@ -224,13 +291,9 @@ window.ArtifactsLoader = (function(){
       };
     }
 
-    // Animate progress bars (in case modal just opened)
-    // We give a small timeout to let the modal render (if using bootstrap modal open)
     setTimeout(function(){
       var bars = breakdownNode.querySelectorAll('.progress-bar');
       bars.forEach(function(b){
-        // ensure style.width already set (createProgressBar sets it) — this is gentle.
-        // Add CSS transition if not present
         if (!b.style.transition) b.style.transition = 'width 700ms ease';
       });
     }, 80);
@@ -239,19 +302,209 @@ window.ArtifactsLoader = (function(){
 
 })();
 
-// animate all progress bars that have a data-width attribute
+
+// animate progress bars that have a data-width attribute
 document.addEventListener('DOMContentLoaded', function(){
   setTimeout(function(){
     document.querySelectorAll('.progress-bar[data-width]').forEach(function(bar){
       try {
         var target = parseInt(bar.getAttribute('data-width')) || 0;
-        // ensure transition exists
         if (!bar.style.transition) bar.style.transition = 'width 700ms ease';
-        // trigger the animated width change
         bar.style.width = target + '%';
       } catch(e){
         console.debug("progress-bar animate error", e);
       }
     });
-  }, 80); // tiny delay to allow any bootstrap modal display
+  }, 80);
 });
+
+
+// -----------------------------
+// Verify & CoC UI wiring
+// -----------------------------
+document.addEventListener('DOMContentLoaded', function () {
+  // init bootstrap tooltips if available
+  try {
+    var tList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    tList.forEach(function(el) { new bootstrap.Tooltip(el); });
+  } catch (e) {}
+
+  // VERIFY button: call /api/coc/verify/<case>/<artifact> and update the meta-status element
+  document.querySelectorAll('.verify-btn').forEach(function(btn) {
+    btn.addEventListener('click', async function(ev) {
+      var art = btn.getAttribute('data-artifact');
+      var statusEl = document.getElementById('meta-status-' + art);
+      if (!statusEl) return;
+      statusEl.innerHTML = '<span class="badge bg-secondary">Verifying…</span>';
+      try {
+        var resp = await fetch('/api/coc/verify/' + encodeURIComponent(window.location.search.match(/[?&]case_id=([^&]*)/) ? decodeURIComponent(window.location.search.match(/[?&]case_id=([^&]*)/)[1]) : (document.querySelector('select[name="case_id"]') ? document.querySelector('select[name="case_id"]').value : 'case001')) + '/' + encodeURIComponent(art));
+        var data = null;
+        try { data = await safeFetchJson(resp); } catch (e) { console.error("parse error", e); }
+
+        if (!resp.ok) {
+          statusEl.innerHTML = '<span class="badge bg-danger">Verify error</span>';
+          return;
+        }
+
+        // show metadata HMAC state
+        if (data && data.metadata_hmac_ok) {
+          if (data.on_disk_sha256 && data.computed_sha256 && data.on_disk_sha256 === data.computed_sha256) {
+            statusEl.innerHTML = '<span class="badge bg-success">META OK</span>';
+          } else if (data.on_disk_sha256 && data.computed_sha256 && data.on_disk_sha256 !== data.computed_sha256) {
+            statusEl.innerHTML = '<span class="badge bg-danger">HASH MISMATCH</span> <small class="text-muted">expected ' + (data.on_disk_sha256?data.on_disk_sha256.slice(0,8)+'…':'?') + ' got ' + (data.computed_sha256?data.computed_sha256.slice(0,8)+'…':'?') + '</small>';
+          } else {
+            statusEl.innerHTML = '<span class="badge bg-success">META OK</span>';
+          }
+        } else {
+          statusEl.innerHTML = '<span class="badge bg-danger">META TAMPERED</span>';
+          if (data && data.metadata_hmac_details) {
+            var det = data.metadata_hmac_details;
+            if (det.expected || det.observed) {
+              statusEl.innerHTML += '<div class="small text-muted">expected:'+ (det.expected ? det.expected.slice(0,8)+'…':'?') + ' observed:' + (det.observed ? det.observed.slice(0,8)+'…':'?') + '</div>';
+            }
+          }
+        }
+      } catch (e) {
+        statusEl.innerHTML = '<span class="badge bg-danger">Verify failed</span>';
+        console.error(e);
+      }
+    });
+  });
+
+
+  // CoC per-artifact: open modal and load entries from /api/coc/<case>/<artifact>
+  async function loadCocForArtifact(caseId, artifactId) {
+    var entriesEl = document.getElementById('coc-entries');
+    var loading = document.getElementById('coc-loading');
+    entriesEl.innerHTML = '';
+    loading.textContent = 'Loading CoC entries…';
+    try {
+      var resp = await fetch('/api/coc/' + encodeURIComponent(caseId) + '/' + encodeURIComponent(artifactId));
+      if (!resp.ok) {
+        entriesEl.innerHTML = '<div class="text-danger small">Failed to load CoC entries</div>';
+        loading.textContent = '';
+        return;
+      }
+      var rows = await resp.json();
+      if (!rows || rows.length === 0) {
+        entriesEl.innerHTML = '<div class="small text-muted">No CoC entries for artifact ' + artifactId + '.</div>';
+      } else {
+        rows.sort(function(a,b){ return new Date(a.ts) - new Date(b.ts); });
+        rows.forEach(function(r){
+          var item = document.createElement('div');
+          item.className = 'list-group-item';
+          var details = '<div><strong>' + (r.actor||'unknown') + '</strong> — <small class="text-muted">' + (r.action||'') + ' @ ' + (r.ts || '') + '</small></div>';
+          details += '<div class="small">' + (r.reason || '') + (r.location ? ' — ' + r.location : '') + '</div>';
+          if (r.signature) details += '<div class="mt-1 small text-muted">sig: ' + r.signature.slice(0,12) + '…</div>';
+          item.innerHTML = details;
+          entriesEl.appendChild(item);
+        });
+      }
+    } catch (e) {
+      entriesEl.innerHTML = '<div class="text-danger small">Error loading CoC</div>';
+      console.error(e);
+    } finally {
+      loading.textContent = '';
+    }
+  }
+
+  document.querySelectorAll('.coc-btn').forEach(function(btn) {
+    btn.addEventListener('click', function(){
+      var art = btn.getAttribute('data-artifact');
+      var caseIdInput = (new URLSearchParams(window.location.search)).get('case_id') || document.querySelector('select[name="case_id"]')?.value || 'case001';
+      var modal = new bootstrap.Modal(document.getElementById('cocModal'));
+      modal.show();
+      document.getElementById('cocModalLabel').textContent = 'Chain of Custody — Artifact: ' + art;
+      loadCocForArtifact(caseIdInput, art);
+
+      (async function(){
+        try {
+          var resp = await fetch('/api/coc/' + encodeURIComponent(caseIdInput) + '/' + encodeURIComponent(art));
+          if (resp.ok) {
+            var rows = await resp.json();
+            var summ = rows && rows.length ? (rows.length + ' entry' + (rows.length>1 ? 'ies' : '')) : 'No CoC entries';
+            var el = document.getElementById('coc-summary-' + art);
+            if (el) el.textContent = summ;
+          }
+        } catch(e){}
+      })();
+    });
+  });
+
+  // Case-level CoC aggregation: gather CoC entries for all artifacts shown
+  document.getElementById('case-coc-btn')?.addEventListener('click', async function(){
+    var caseId = (new URLSearchParams(window.location.search)).get('case_id') || document.querySelector('select[name="case_id"]')?.value || 'case001';
+    var modal = new bootstrap.Modal(document.getElementById('cocModal'));
+    modal.show();
+    document.getElementById('cocModalLabel').textContent = 'Chain of Custody — Case: ' + caseId;
+    var entriesEl = document.getElementById('coc-entries');
+    var loading = document.getElementById('coc-loading');
+    entriesEl.innerHTML = '';
+    loading.textContent = 'Gathering CoC entries for case…';
+
+    var rows = Array.from(document.querySelectorAll('tr[data-artifact-id]'));
+    var artifactIds = rows.map(function(r){ return r.getAttribute('data-artifact-id'); }).filter(Boolean);
+    var combined = [];
+    for (var i=0;i<artifactIds.length;i++) {
+      var art = artifactIds[i];
+      try {
+        var resp = await fetch('/api/coc/' + encodeURIComponent(caseId) + '/' + encodeURIComponent(art));
+        if (resp.ok) {
+          var arr = await resp.json();
+          arr.forEach(function(item){ item._artifact_id = art; combined.push(item); });
+        }
+      } catch(e) {
+        console.debug('CoC fetch failed for', art, e);
+      }
+    }
+
+    if (combined.length === 0) {
+      entriesEl.innerHTML = '<div class="small text-muted">No CoC entries found for case.</div>';
+      loading.textContent = '';
+      return;
+    }
+
+    combined.sort(function(a,b){ return new Date(a.ts) - new Date(b.ts); });
+    combined.forEach(function(r){
+      var el = document.createElement('div');
+      el.className = 'list-group-item';
+      var header = '<div><strong>' + (r.actor||'unknown') + '</strong> — <small class="text-muted">' + (r.action||'') + ' @ ' + (r.ts||'') + '</small></div>';
+      var artifactLbl = '<div class="small text-muted">artifact: <code>' + (r._artifact_id || '') + '</code></div>';
+      var reason = '<div class="small">' + (r.reason || '') + (r.location ? ' — ' + r.location : '') + '</div>';
+      if (r.signature) reason += '<div class="mt-1 small text-muted">sig: ' + r.signature.slice(0,12) + '…</div>';
+      el.innerHTML = header + artifactLbl + reason;
+      entriesEl.appendChild(el);
+    });
+
+    loading.textContent = '';
+  });
+
+  // Coc modal refresh button logic
+  document.getElementById('coc-refresh-btn')?.addEventListener('click', function(){
+    var title = document.getElementById('cocModalLabel').textContent || '';
+    if (title.indexOf('Artifact:') !== -1) {
+      var art = title.split('Artifact:').pop().trim();
+      var caseId = (new URLSearchParams(window.location.search)).get('case_id') || document.querySelector('select[name="case_id"]')?.value || 'case001';
+      loadCocForArtifact(caseId, art);
+    } else {
+      document.getElementById('case-coc-btn')?.click();
+    }
+  });
+
+  // Implement the missing refreshCocSummaryForArtifact used after CoC add
+  window.refreshCocSummaryForArtifact = async function(caseId, artifactId) {
+    try {
+      var resp = await fetch('/api/coc/' + encodeURIComponent(caseId) + '/' + encodeURIComponent(artifactId));
+      if (!resp.ok) return;
+      var rows = await resp.json();
+      var summ = rows && rows.length ? (rows.length + ' entry' + (rows.length>1 ? 'ies' : '')) : 'No CoC entries';
+      var el = document.getElementById('coc-summary-' + artifactId);
+      if (el) el.textContent = summ;
+    } catch (e) {
+      console.debug('refreshCocSummaryForArtifact failed', e);
+    }
+  };
+
+}); // DOMContentLoaded end
+
+

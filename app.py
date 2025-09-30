@@ -6,6 +6,18 @@ import uuid
 from datetime import datetime, timezone
 # --- Heuristics integration imports ---
 from werkzeug.utils import secure_filename
+from modules import utils as mutils
+
+from modules.utils import (
+    write_signed_metadata,
+    verify_signed_metadata,
+    hmac_for_obj,
+    record_audit,
+    ensure_case_dirs,
+    atomic_write_json
+)
+
+from modules.models import ChainOfCustody
 
 def _heuristics_stub(path, *args, **kwargs):
     return {"suspicion_score": None, "reasons": [], "component_scores": {}}
@@ -17,7 +29,7 @@ except Exception:
 
 
 # utils for file saves (keeps existing behavior)
-from modules.utils import save_uploaded_file, ensure_case_dirs, iso_time_now
+from modules.utils import save_uploaded_file, iso_time_now
 from werkzeug.exceptions import RequestEntityTooLarge
 from modules.hashing import compute_sha256, update_artifact_hash
 from modules.ioc import check_iocs_for_artifact
@@ -25,7 +37,6 @@ from modules.yara import scan_artifact as yara_scan_artifact, compile_rules as y
 from modules import utils_events
 
 import shutil
-from modules.timeline_utils import is_sysmon_csv, parse_sysmon_csv_to_processes, append_json_events
 
 # DB
 from modules.db import db
@@ -109,8 +120,27 @@ def manifest_path_for_case(case_id):
 def load_manifest(case_id):
     manifest_p = manifest_path_for_case(case_id)
     if os.path.exists(manifest_p):
-        with open(manifest_p, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            # verify hmac; verify_signed_metadata returns (ok, details)
+            ok, details = verify_signed_metadata(manifest_p)
+            if not ok:
+                # record an audit event: manifest HMAC mismatch detected
+                try:
+                    record_audit(db, case_id, None, "system:verifier", "manifest_hmac_mismatch", details)
+                except Exception:
+                    logger.exception("Failed to record audit for manifest_hmac_mismatch for %s", case_id)
+            # return manifest contents regardless (caller decides how to handle)
+            with open(manifest_p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            # if verification failed unexpectedly, fallback to reading manifest and log
+            logger.exception("Failed to verify manifest HMAC for %s; returning raw manifest", case_id)
+            try:
+                with open(manifest_p, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                logger.exception("Failed to read manifest even after verification error for %s", case_id)
+    # default empty manifest if missing or unreadable
     return {
         "case_id": case_id,
         "created_at": iso_time_now(),
@@ -120,26 +150,22 @@ def load_manifest(case_id):
 
 def save_manifest(case_id, manifest):
     """
-    Atomically write manifest.json for a case to avoid partial-write races.
+    Atomically write and sign manifest.json for a case to avoid partial-write races.
     """
     case_dir, _ = ensure_case_dirs(case_id)
     manifest_p = manifest_path_for_case(case_id)
-    temp_path = manifest_p + ".tmp"
     try:
-        with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2)
-        # atomic replace
-        os.replace(temp_path, manifest_p)
+        write_signed_metadata(manifest_p, manifest)
     except Exception:
-        logger.exception("Failed to write manifest atomically")
-        # cleanup temp file if present
+        logger.exception("Failed to write & sign manifest atomically")
+        # fallback: try cleanup whatever .tmp exists
+        temp_path = manifest_p + ".tmp"
         try:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
         except Exception:
             pass
         raise
-
 
 
 def add_artifact_to_manifest(case_id, artifact_metadata):
@@ -201,12 +227,105 @@ def upload_file():
         logger.exception("Upload failed while saving file")
         return jsonify({"error": "Failed to save uploaded file"}), 500
 
+    # ensure manifest variable exists so later error-handling / returns don't NameError
+    manifest = {}
+
     # Keep a manifest entry for the uploaded file itself (unchanged)
     try:
         manifest = add_artifact_to_manifest(case_id, metadata)
     except Exception:
-        logger.exception("Failed to update manifest after upload")
-        return jsonify({"error": "Failed to update manifest"}), 500
+        # log but do not let missing manifest blow up the whole upload flow
+        logger.exception("Failed to update manifest after upload — continuing without manifest")
+        # manifest stays as {} so later code can safely inspect it
+
+    # -----------------------
+    # Deduplication & immediate integrity handling (NEW)
+    # -----------------------
+    try:
+        # compute sha256 (best-effort) right after save so we can dedupe before DB row creation
+        saved_path = metadata.get("saved_path")
+        sha256_hex = None
+        bytes_total = None
+        if saved_path and os.path.exists(saved_path):
+            try:
+                sha256_hex, bytes_total = compute_sha256(saved_path)
+            except Exception:
+                logger.exception("Failed to compute sha right after upload for %s", metadata.get("artifact_id"))
+
+        if sha256_hex:
+            metadata["sha256"] = sha256_hex
+
+        # Try to detect duplicate across DB by SHA
+        duplicate_found = None
+        try:
+            if sha256_hex:
+                from modules.hashing import find_artifact_by_sha
+                dup = find_artifact_by_sha(sha256_hex)
+                if dup:
+                    duplicate_found = {"artifact_id": dup.artifact_id, "case_id": dup.case_id, "db_id": getattr(dup, "id", None)}
+        except Exception:
+            logger.exception("Duplicate lookup failed for %s", metadata.get("artifact_id"))
+
+        # Annotate on-disk artifact JSON and sign it atomically (robust version)
+        try:
+            _, artifacts_dir = ensure_case_dirs(case_id)
+            meta_path = os.path.join(artifacts_dir, f"{metadata['artifact_id']}.json")
+
+            # Defensive read (returns {} on missing/corrupt)
+            on_disk_meta = mutils.load_signed_metadata_safe(meta_path)
+            on_disk_meta = mutils.normalize_metadata_dict(on_disk_meta)
+
+            # always set sha if present
+            if sha256_hex:
+                on_disk_meta["sha256"] = sha256_hex
+                on_disk_meta.setdefault("analysis", {}).setdefault("integrity", [])
+                on_disk_meta["analysis"]["latest_sha256"] = sha256_hex
+
+            if duplicate_found:
+                metadata["is_duplicate"] = True
+                metadata["duplicate_of"] = duplicate_found["artifact_id"]
+                on_disk_meta["is_duplicate"] = True
+                on_disk_meta["duplicate_of"] = duplicate_found["artifact_id"]
+
+                # sign and persist duplicate-marked metadata
+                try:
+                    mutils.write_signed_metadata(meta_path, on_disk_meta)
+                except Exception:
+                    logger.exception("mutils.write_signed_metadata failed when marking duplicate for %s", metadata.get("artifact_id"))
+                    try:
+                        mutils.atomic_write_json(meta_path, on_disk_meta)
+                    except Exception:
+                        logger.exception("Fallback atomic write failed when marking duplicate %s", metadata.get("artifact_id"))
+
+                # audit duplicate detection
+                try:
+                    record_audit(db, case_id, metadata.get("artifact_id"), "system", "duplicate_detected",
+                                 {"duplicate_of": duplicate_found["artifact_id"], "sha256": sha256_hex})
+                except Exception:
+                    logger.exception("Failed to write audit for duplicate_detected %s", metadata.get("artifact_id"))
+
+            else:
+                # not a duplicate -> persist sha and update DB via update_artifact_hash()
+                try:
+                    mutils.write_signed_metadata(meta_path, on_disk_meta)
+                except Exception:
+                    logger.exception("write_signed_metadata failed after upload for %s; attempting atomic write", metadata.get("artifact_id"))
+                    try:
+                        mutils.atomic_write_json(meta_path, on_disk_meta)
+                    except Exception:
+                        logger.exception("Fallback atomic write failed for sha write %s", metadata.get("artifact_id"))
+
+                # update DB + append integrity history + audit
+                try:
+                    update_artifact_hash(case_id, metadata["artifact_id"], sha256_hex)
+                except Exception:
+                    logger.exception("update_artifact_hash failed for %s after upload", metadata.get("artifact_id"))
+
+        except Exception:
+            logger.exception("Failed annotating artifact JSON on disk for %s", metadata.get("artifact_id"))
+
+    except Exception:
+        logger.exception("Unexpected error during post-save dedupe/integrity handling")
 
     # --- ZIP file branch: detect and process archive contents ---
     try:
@@ -254,7 +373,7 @@ def upload_file():
             for path in extracted_paths:
                 try:
                     # compute sha
-                    sha = compute_sha256(path)
+                    sha, _ = compute_sha256(path)
 
                     # run heuristics (best effort)
                     heur_report = {}
@@ -527,11 +646,30 @@ def upload_file():
                         "reasons": final.get("reasons")
                     }
 
-                    # persist artifact JSON next to file
+                    # persist artifact JSON next to file (signed & atomic, merge safely)
                     try:
                         meta_path = os.path.join(os.path.dirname(path), f"{artifact_meta['artifact_id']}.json")
-                        with open(meta_path, "w", encoding="utf-8") as fh:
-                            json.dump(artifact_meta, fh, indent=2)
+
+                        # load existing (if any), normalize and merge to avoid clobbering
+                        existing = mutils.load_signed_metadata_safe(meta_path)
+                        existing = mutils.normalize_metadata_dict(existing)
+
+                        # overlay top-level fields from artifact_meta (but don't copy any existing _meta)
+                        existing.pop("_meta", None)
+                        for k, v in (artifact_meta or {}).items():
+                            if k == "_meta":
+                                continue
+                            existing[k] = v
+
+                        # write & sign preferred, fallback to atomic
+                        try:
+                            mutils.write_signed_metadata(meta_path, existing)
+                        except Exception:
+                            logger.exception("Failed to write_signed_metadata for %s; attempting atomic write", path)
+                            try:
+                                mutils.atomic_write_json(meta_path, existing)
+                            except Exception:
+                                logger.exception("Fallback atomic write failed for artifact metadata %s", artifact_meta.get("artifact_id"))
                     except Exception:
                         logger.exception("Failed to write artifact metadata for %s", path)
 
@@ -655,8 +793,12 @@ def upload_file():
             uploaded_by=metadata.get("uploaded_by"),
             uploaded_at=uploaded_at_dt,
             size_bytes=metadata.get("size_bytes"),
-            analysis=None
+            sha256=metadata.get("sha256"),  # may be None initially; set if computed earlier
+            is_duplicate=bool(metadata.get("is_duplicate", False)),
+            duplicate_of=metadata.get("duplicate_of"),
+            analysis=json.dumps(metadata.get("analysis") or {})  # store empty dict rather than None for consistency
         )
+
         db.session.add(artifact)
         db.session.commit()
     except Exception:
@@ -665,7 +807,7 @@ def upload_file():
 
     # 4) Compute SHA-256, update artifact metadata + manifest + DB
     try:
-        sha256_hex = compute_sha256(metadata["saved_path"])
+        sha256_hex, _ = compute_sha256(metadata["saved_path"])
         update_artifact_hash(case_id, metadata["artifact_id"], sha256_hex)
 
         # add sha256 to the metadata that we return to the client
@@ -734,17 +876,27 @@ def upload_file():
                         # If DB record missing (unlikely), fallback to writing artifact-side JSON
                         metadata["analysis"] = {"heuristics": heuristics_report}
 
-                    # Also write to artifact JSON file adjacent to saved artifact
+                    # Also write to artifact JSON file adjacent to saved artifact (robust merge + sign)
                     meta_path = os.path.join(os.path.dirname(metadata["saved_path"]), f"{metadata['artifact_id']}.json")
                     try:
-                        on_disk_meta = {}
-                        if os.path.exists(meta_path):
-                            with open(meta_path, "r", encoding="utf-8") as fh:
-                                on_disk_meta = json.load(fh)
+
+                        on_disk_meta = mutils.load_signed_metadata_safe(meta_path)
+                        on_disk_meta = mutils.normalize_metadata_dict(on_disk_meta)
+
+                        # merge heuristics into analysis safely
                         on_disk_meta.setdefault("analysis", {})
                         on_disk_meta["analysis"].setdefault("heuristics", heuristics_report)
-                        with open(meta_path, "w", encoding='utf-8') as fh:
-                            json.dump(on_disk_meta, fh, indent=2)
+
+                        try:
+                            mutils.write_signed_metadata(meta_path, on_disk_meta)
+                        except Exception:
+                            logger.exception("Failed to write & sign heuristics artifact metadata for %s; attempting atomic write", metadata.get("artifact_id"))
+                            try:
+                                mutils.atomic_write_json(meta_path, on_disk_meta)
+                            except Exception:
+                                logger.exception("Fallback atomic write failed for heuristics metadata %s", metadata.get("artifact_id"))
+                    except Exception:
+                        logger.exception("Failed to write heuristics into artifact JSON on disk for %s", metadata.get("artifact_id"))
                     except Exception:
                         logger.exception("Failed to write heuristics into artifact JSON on disk for %s", metadata.get("artifact_id"))
 
@@ -810,22 +962,27 @@ def upload_file():
                 logger.exception("Failed to persist final score to DB for %s", metadata.get("artifact_id"))
 
             # Also update artifact JSON file (atomic write)
+            # Also update artifact JSON file (signed preferred, atomic fallback)
             try:
                 meta_path = os.path.join(os.path.dirname(metadata["saved_path"]), f"{metadata['artifact_id']}.json")
-                on_disk_meta = {}
-                if os.path.exists(meta_path):
-                    try:
-                        with open(meta_path, "r", encoding="utf-8") as fh:
-                            on_disk_meta = json.load(fh)
-                    except Exception:
-                        on_disk_meta = {}
-                on_disk_meta.setdefault("analysis", {})
+
+                on_disk_meta = mutils.load_signed_metadata_safe(meta_path)
+                on_disk_meta = mutils.normalize_metadata_dict(on_disk_meta)
+
+
                 # merge final analysis keys
-                on_disk_meta["analysis"].update(metadata["analysis"])
-                tmp = meta_path + ".tmp"
-                with open(tmp, "w", encoding='utf-8') as fh:
-                    json.dump(on_disk_meta, fh, indent=2)
-                os.replace(tmp, meta_path)
+                on_disk_meta.setdefault("analysis", {})
+                if isinstance(metadata.get("analysis"), dict):
+                    on_disk_meta["analysis"].update(metadata["analysis"])
+
+                try:
+                    mutils.write_signed_metadata(meta_path, on_disk_meta)
+                except Exception:
+                    logger.exception("Failed to write & sign final analysis metadata for %s; attempting atomic write", metadata.get("artifact_id"))
+                    try:
+                        mutils.atomic_write_json(meta_path, on_disk_meta)
+                    except Exception:
+                        logger.exception("Fallback atomic write failed for final analysis metadata %s", metadata.get("artifact_id"))
             except Exception:
                 logger.exception("Failed to write final score into artifact JSON on disk for %s", metadata.get("artifact_id"))
 
@@ -1010,19 +1167,25 @@ def heuristics_upload():
                     metadata["analysis"] = existing
                 else:
                     metadata["analysis"] = {"heuristics": heuristics_report}
-                # write artifact JSON file
+                # write artifact JSON file (robust merge + sign)
                 meta_path = os.path.join(os.path.dirname(metadata["saved_path"]), f"{metadata['artifact_id']}.json")
-                on_disk_meta = {}
-                if os.path.exists(meta_path):
+                try:
+                    on_disk_meta = mutils.load_signed_metadata_safe(meta_path)
+                    on_disk_meta = mutils.normalize_metadata_dict(on_disk_meta)
+                    on_disk_meta.setdefault("analysis", {})
+                    on_disk_meta["analysis"].setdefault("heuristics", heuristics_report)
+
                     try:
-                        with open(meta_path, "r", encoding="utf-8") as fh:
-                            on_disk_meta = json.load(fh)
+                        mutils.write_signed_metadata(meta_path, on_disk_meta)
                     except Exception:
-                        on_disk_meta = {}
-                on_disk_meta.setdefault("analysis", {})
-                on_disk_meta["analysis"].setdefault("heuristics", heuristics_report)
-                with open(meta_path, "w", encoding="utf-8") as fh:
-                    json.dump(on_disk_meta, fh, indent=2)
+                        logger.exception("Failed to write & sign heuristics artifact metadata for %s; attempting atomic write", metadata.get("artifact_id"))
+                        try:
+                            mutils.atomic_write_json(meta_path, on_disk_meta)
+                        except Exception:
+                            logger.exception("Fallback atomic write failed for heuristics metadata %s", metadata.get("artifact_id"))
+                except Exception:
+                    logger.exception("Failed to write heuristics into artifact JSON on disk for %s", metadata.get("artifact_id"))
+
             except Exception:
                 logger.exception("Failed to persist heuristics from /heuristics upload")
         except Exception:
@@ -1092,8 +1255,17 @@ def heuristics_api():
                 on_disk_meta = {}
         on_disk_meta.setdefault("analysis", {})
         on_disk_meta["analysis"].setdefault("heuristics", heuristics_report)
-        with open(meta_path, "w", encoding="utf-8") as fh:
-            json.dump(on_disk_meta, fh, indent=2)
+        try:
+            mutils.write_signed_metadata(meta_path, on_disk_meta)
+        except Exception:
+            logger.exception("Failed to write & sign heuristics artifact metadata for %s; attempting atomic write", metadata.get("artifact_id"))
+            try:
+                tmp = meta_path + ".tmp"
+                with open(tmp, "w", encoding='utf-8') as fh:
+                    json.dump(on_disk_meta, fh, indent=2)
+                os.replace(tmp, meta_path)
+            except Exception:
+                logger.exception("Fallback atomic write failed for heuristics metadata %s", metadata.get("artifact_id"))
     except Exception:
         logger.exception("Failed to persist heuristics in API for %s", metadata.get("artifact_id"))
 
@@ -1206,7 +1378,7 @@ def api_recompute_score(case_id, artifact_id):
                 from modules.hashing import compute_sha256, update_artifact_hash
                 sha = meta.get("sha256")
                 if not sha:
-                    sha = compute_sha256(saved_path)
+                    sha, _ = compute_sha256(saved_path)
                     meta["sha256"] = sha
                     # ensure DB/manifest updated by calling update_artifact_hash helper
                     try:
@@ -1263,14 +1435,31 @@ def api_recompute_score(case_id, artifact_id):
             logger.exception("Final scoring failed for %s/%s", case_id, artifact_id)
             return jsonify({"status": "error", "error": "scoring failed"}), 500
 
-        # 7) persist changes: artifact JSON (atomic)
+        # 7) persist changes: artifact JSON (signed preferred, atomic fallback), merge safely
         try:
-            tmp = meta_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(meta, fh, indent=2)
-            os.replace(tmp, meta_path)
+            existing = mutils.load_signed_metadata_safe(meta_path)
+            existing = mutils.normalize_metadata_dict(existing)            # overlay new meta (avoid copying any _meta)
+            existing.pop("_meta", None)
+            # merge analysis/top-level keys from meta into existing
+            for k, v in (meta or {}).items():
+                if k == "_meta":
+                    continue
+                if k == "analysis" and isinstance(v, dict):
+                    existing.setdefault("analysis", {})
+                    existing["analysis"].update(v)
+                else:
+                    existing[k] = v
+
+            try:
+                mutils.write_signed_metadata(meta_path, existing)
+            except Exception:
+                logger.exception("Failed to write & sign updated artifact metadata for %s/%s; attempting atomic write", case_id, artifact_id)
+                try:
+                    mutils.atomic_write_json(meta_path, existing)
+                except Exception:
+                    logger.exception("Fallback atomic write failed for recompute metadata %s/%s", case_id, artifact_id)
         except Exception:
-            logger.exception("Failed to write updated artifact metadata for %s/%s", case_id, artifact_id)
+            logger.exception("Failed to persist updated artifact metadata for %s/%s", case_id, artifact_id)
 
         # 8) persist to DB (Artifact.analysis)
         try:
@@ -1346,6 +1535,175 @@ def api_case_counts(case_id):
         timeline_count = 0
 
     return jsonify({"artifact_count": artifact_count, "timeline_count": timeline_count})
+
+
+@app.route("/api/coc/add", methods=["POST"])
+def api_coc_add():
+    """
+    Add a Chain-of-Custody entry.
+    Body JSON: case_id, artifact_id, actor, action, from, to, reason, location, details (optional dict)
+    """
+    body = request.get_json(force=True) or {}
+    case_id = body.get("case_id")
+    artifact_id = body.get("artifact_id")
+    actor = body.get("actor", "unknown")
+    action = body.get("action", "access")
+    from_entity = body.get("from")
+    to_entity = body.get("to")
+    reason = body.get("reason")
+    location = body.get("location")
+    details = body.get("details")
+
+    if not case_id or not artifact_id:
+        return jsonify({"error": "case_id and artifact_id required"}), 400
+
+    try:
+        # Create DB row
+        coc = ChainOfCustody(
+            case_id=case_id,
+            artifact_id=artifact_id,
+            actor=actor,
+            action=action,
+            from_entity=from_entity,
+            to_entity=to_entity,
+            reason=reason,
+            location=location,
+            details=json.dumps(details) if details else None
+        )
+        db.session.add(coc)
+        db.session.commit()
+
+        # Build payload to sign/store on-disk
+        payload = {
+            "ts": coc.ts.isoformat() + "Z",
+            "case_id": case_id,
+            "artifact_id": artifact_id,
+            "actor": actor,
+            "action": action,
+            "from": from_entity,
+            "to": to_entity,
+            "reason": reason,
+            "location": location,
+            "details": details
+        }
+
+        # compute signature (HMAC) and persist into DB record
+        signature = hmac_for_obj(payload)
+        coc.signature = signature
+        db.session.add(coc)
+        db.session.commit()
+
+        # Append to artifact metadata on disk (safely), and re-sign artifact JSON
+        try:
+            _, artifacts_dir = ensure_case_dirs(case_id)
+            meta_path = os.path.join(artifacts_dir, f"{artifact_id}.json")
+            if os.path.exists(meta_path):
+                with open(meta_path, "r", encoding="utf-8") as fh:
+                    meta = json.load(fh)
+                # ensure analysis.coc is a list
+                meta.setdefault("analysis", {}).setdefault("coc", [])
+                # Python 3.9+: merge, but to be safe create a copy for older versions
+                entry = dict(payload)
+                entry["signature"] = signature
+                meta["analysis"]["coc"].append(entry)
+                # write & sign artifact metadata (write_signed_metadata provided in modules.utils)
+                try:
+                    write_signed_metadata(meta_path, meta)
+                except Exception:
+                    # fallback: atomic_write_json if write_signed_metadata unavailable
+                    logger.exception("Failed to write_signed_metadata for %s/%s; attempting atomic write", case_id, artifact_id)
+                    try:
+                        atomic_write_json(meta_path, meta)
+                    except Exception:
+                        logger.exception("Failed fallback atomic write for CoC append %s/%s", case_id, artifact_id)
+        except Exception:
+            logger.exception("Failed to append CoC entry to artifact JSON for %s/%s", case_id, artifact_id)
+
+        # Audit the CoC add action
+        try:
+            record_audit(db, case_id, artifact_id, actor, "coc_add", {"action": action, "signature": signature})
+        except Exception:
+            logger.exception("Failed to record audit for CoC add %s/%s", case_id, artifact_id)
+
+        return jsonify({"status": "ok", "id": coc.id, "signature": signature}), 201
+
+    except Exception as e:
+        db.session.rollback()
+        logger.exception("Failed to create CoC entry for %s/%s", case_id, artifact_id)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/coc/<case_id>/<artifact_id>", methods=["GET"])
+def api_coc_get(case_id, artifact_id):
+    try:
+        rows = ChainOfCustody.query.filter_by(case_id=case_id, artifact_id=artifact_id).order_by(ChainOfCustody.ts.asc()).all()
+        return jsonify([r.to_dict() for r in rows])
+    except Exception:
+        logger.exception("Failed to fetch CoC entries for %s/%s", case_id, artifact_id)
+        return jsonify({"error": "failed to fetch"}), 500
+
+
+@app.route("/api/coc/verify/<case_id>/<artifact_id>", methods=["GET"])
+def api_coc_verify(case_id, artifact_id):
+    try:
+        _, artifacts_dir = ensure_case_dirs(case_id)
+        meta_path = os.path.join(artifacts_dir, f"{artifact_id}.json")
+        if not os.path.exists(meta_path):
+            return jsonify({"status": "error", "error": "metadata missing"}), 404
+
+        ok, details = verify_signed_metadata(meta_path)
+        with open(meta_path, "r", encoding="utf-8") as fh:
+            meta = json.load(fh)
+
+        # figure out on-disk reference SHA
+        on_disk_sha = None
+        if meta.get("analysis", {}):
+            on_disk_sha = meta.get("analysis", {}).get("latest_sha256") or meta.get("analysis", {}).get("sha256")
+        if not on_disk_sha:
+            on_disk_sha = meta.get("sha256")
+
+        saved_path = meta.get("saved_path")
+        computed_sha = None
+        if saved_path and os.path.exists(saved_path):
+            try:
+                computed_sha, _ = compute_sha256(saved_path)
+            except Exception:
+                logger.exception("Failed to compute sha for %s/%s", case_id, artifact_id)
+
+        result = {
+            "metadata_hmac_ok": ok,
+            "metadata_hmac_details": details,
+            "on_disk_sha256": on_disk_sha,
+            "computed_sha256": computed_sha
+        }
+
+        # Audit results
+        if not ok:
+            record_audit(db, case_id, artifact_id, "system:verifier", "metadata_hmac_mismatch", details)
+        if on_disk_sha and computed_sha and on_disk_sha != computed_sha:
+            record_audit(db, case_id, artifact_id, "system:verifier", "hash_mismatch", {"expected": on_disk_sha, "observed": computed_sha})
+        elif computed_sha is not None:
+            record_audit(db, case_id, artifact_id, "system:verifier", "hash_ok", {"sha256": computed_sha})
+
+        return jsonify(result)
+
+    except Exception:
+        logger.exception("Verification endpoint failed for %s/%s", case_id, artifact_id)
+        return jsonify({"error": "verification failed"}), 500
+
+@app.route("/coc/case/<case_id>")
+def view_case_coc(case_id):
+    """
+    Render case-level Chain-of-Custody / audit entries aggregated for the case.
+    """
+    try:
+        rows = ChainOfCustody.query.filter_by(case_id=case_id).order_by(ChainOfCustody.ts.asc()).all()
+        # Convert rows to dicts for template
+        entries = [r.to_dict() for r in rows]
+        return render_template("coc_case.html", case_id=case_id, entries=entries)
+    except Exception:
+        logger.exception("Failed to render case-level CoC for %s", case_id)
+        return render_template("coc_case.html", case_id=case_id, entries=[]), 500
 
 
 if __name__ == "__main__":
