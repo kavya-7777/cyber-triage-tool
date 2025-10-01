@@ -1,11 +1,5 @@
 // static/js/artifacts_loader.js
-// Enhanced artifacts loader + "Why?" modal support
-// OVERVIEW:
-// - Provides safeFetchJson / fetchJsonWrapped to avoid "body already read" issues.
-// - Provides robustUploadFormSubmit for use with your upload form (optional).
-// - Implements Why? modal population, Verify button handling, per-artifact & case-level CoC,
-//   progress bar animation, and tooltip initialization.
-// - Implements refreshCocSummaryForArtifact used after CoC add operations.
+// Corrected & robust CoC + Verify wiring (fixes attribute mismatches + fallback behaviors)
 
 "use strict";
 
@@ -64,10 +58,6 @@ async function robustUploadFormSubmit(formEl) {
     const payload = respWrapper.data;
     console.debug('Upload success payload', payload);
 
-    // If you rely on a full reload to refresh server-state, uncomment:
-    // location.reload();
-
-    // Otherwise call the optional hook the app may provide
     if (window.ArtifactsLoader && typeof window.ArtifactsLoader.onUploadSuccess === 'function') {
       try { window.ArtifactsLoader.onUploadSuccess(payload); } catch (e) { console.error(e); }
     }
@@ -329,15 +319,31 @@ document.addEventListener('DOMContentLoaded', function () {
     tList.forEach(function(el) { new bootstrap.Tooltip(el); });
   } catch (e) {}
 
-  // VERIFY button: call /api/coc/verify/<case>/<artifact> and update the meta-status element
+  // Helper: current case id
+  function currentCaseId() {
+    return (new URLSearchParams(window.location.search)).get('case_id') || document.querySelector('select[name="case_id"]')?.value || 'case001';
+  }
+
+  // VERIFY button: call /api/coc/verify/<case>/<artifact> and update a visible element
   document.querySelectorAll('.verify-btn').forEach(function(btn) {
     btn.addEventListener('click', async function(ev) {
-      var art = btn.getAttribute('data-artifact');
-      var statusEl = document.getElementById('meta-status-' + art);
+      // prefer data-art, fallback to data-artifact
+      var art = btn.getAttribute('data-art') || btn.getAttribute('data-artifact');
+      if (!art) return;
+      // prefer verify-result-<id> (dashboard change). fallback to meta-status-<id>
+      var statusEl = document.getElementById('verify-result-' + art) || document.getElementById('meta-status-' + art);
+      if (!statusEl) {
+        // if no element adjacent, try to find a sibling element in same row
+        var row = btn.closest('tr');
+        if (row) {
+          statusEl = row.querySelector('#verify-result-' + art) || row.querySelector('#meta-status-' + art) || row.querySelector('.meta-status') || null;
+        }
+      }
       if (!statusEl) return;
       statusEl.innerHTML = '<span class="badge bg-secondary">Verifying…</span>';
       try {
-        var resp = await fetch('/api/coc/verify/' + encodeURIComponent(window.location.search.match(/[?&]case_id=([^&]*)/) ? decodeURIComponent(window.location.search.match(/[?&]case_id=([^&]*)/)[1]) : (document.querySelector('select[name="case_id"]') ? document.querySelector('select[name="case_id"]').value : 'case001')) + '/' + encodeURIComponent(art));
+        var caseId = currentCaseId();
+        var resp = await fetch('/api/coc/verify/' + encodeURIComponent(caseId) + '/' + encodeURIComponent(art));
         var data = null;
         try { data = await safeFetchJson(resp); } catch (e) { console.error("parse error", e); }
 
@@ -349,18 +355,22 @@ document.addEventListener('DOMContentLoaded', function () {
         // show metadata HMAC state
         if (data && data.metadata_hmac_ok) {
           if (data.on_disk_sha256 && data.computed_sha256 && data.on_disk_sha256 === data.computed_sha256) {
-            statusEl.innerHTML = '<span class="badge bg-success">META OK</span>';
+            statusEl.innerHTML = '<span class="badge bg-success">OK ✔</span>';
+            statusEl.title = `sha256: ${data.computed_sha256 || ''}`;
           } else if (data.on_disk_sha256 && data.computed_sha256 && data.on_disk_sha256 !== data.computed_sha256) {
-            statusEl.innerHTML = '<span class="badge bg-danger">HASH MISMATCH</span> <small class="text-muted">expected ' + (data.on_disk_sha256?data.on_disk_sha256.slice(0,8)+'…':'?') + ' got ' + (data.computed_sha256?data.computed_sha256.slice(0,8)+'…':'?') + '</small>';
+            statusEl.innerHTML = '<span class="badge bg-danger">HASH MISMATCH ✖</span><div class="small text-muted">expected:' + (data.on_disk_sha256?data.on_disk_sha256.slice(0,8)+'…':'?') + ' got ' + (data.computed_sha256?data.computed_sha256.slice(0,8)+'…':'?') + '</div>';
           } else {
             statusEl.innerHTML = '<span class="badge bg-success">META OK</span>';
+            if (data.on_disk_sha256) statusEl.title = `manifest sha: ${data.on_disk_sha256}`;
           }
         } else {
-          statusEl.innerHTML = '<span class="badge bg-danger">META TAMPERED</span>';
+          statusEl.innerHTML = '<span class="badge bg-danger">META TAMPERED ✖</span>';
           if (data && data.metadata_hmac_details) {
             var det = data.metadata_hmac_details;
             if (det.expected || det.observed) {
               statusEl.innerHTML += '<div class="small text-muted">expected:'+ (det.expected ? det.expected.slice(0,8)+'…':'?') + ' observed:' + (det.observed ? det.observed.slice(0,8)+'…':'?') + '</div>';
+            } else {
+              statusEl.title = JSON.stringify(det || {});
             }
           }
         }
@@ -376,13 +386,14 @@ document.addEventListener('DOMContentLoaded', function () {
   async function loadCocForArtifact(caseId, artifactId) {
     var entriesEl = document.getElementById('coc-entries');
     var loading = document.getElementById('coc-loading');
+    if (!entriesEl) return;
     entriesEl.innerHTML = '';
-    loading.textContent = 'Loading CoC entries…';
+    if (loading) loading.textContent = 'Loading CoC entries…';
     try {
       var resp = await fetch('/api/coc/' + encodeURIComponent(caseId) + '/' + encodeURIComponent(artifactId));
       if (!resp.ok) {
         entriesEl.innerHTML = '<div class="text-danger small">Failed to load CoC entries</div>';
-        loading.textContent = '';
+        if (loading) loading.textContent = '';
         return;
       }
       var rows = await resp.json();
@@ -404,17 +415,25 @@ document.addEventListener('DOMContentLoaded', function () {
       entriesEl.innerHTML = '<div class="text-danger small">Error loading CoC</div>';
       console.error(e);
     } finally {
-      loading.textContent = '';
+      if (loading) loading.textContent = '';
     }
   }
 
   document.querySelectorAll('.coc-btn').forEach(function(btn) {
     btn.addEventListener('click', function(){
-      var art = btn.getAttribute('data-artifact');
+      var art = btn.getAttribute('data-art') || btn.getAttribute('data-artifact');
+      if (!art) return;
       var caseIdInput = (new URLSearchParams(window.location.search)).get('case_id') || document.querySelector('select[name="case_id"]')?.value || 'case001';
-      var modal = new bootstrap.Modal(document.getElementById('cocModal'));
-      modal.show();
-      document.getElementById('cocModalLabel').textContent = 'Chain of Custody — Artifact: ' + art;
+      var modalEl = document.getElementById('cocModal');
+      if (!modalEl) {
+        // fallback: try to open bootstrap modal by id; if not present just open a plain dialog
+        console.debug('cocModal not found in DOM');
+      } else {
+        var modal = new bootstrap.Modal(modalEl);
+        modal.show();
+      }
+      var label = document.getElementById('cocModalLabel');
+      if (label) label.textContent = 'Chain of Custody — Artifact: ' + art;
       loadCocForArtifact(caseIdInput, art);
 
       (async function(){
@@ -434,16 +453,25 @@ document.addEventListener('DOMContentLoaded', function () {
   // Case-level CoC aggregation: gather CoC entries for all artifacts shown
   document.getElementById('case-coc-btn')?.addEventListener('click', async function(){
     var caseId = (new URLSearchParams(window.location.search)).get('case_id') || document.querySelector('select[name="case_id"]')?.value || 'case001';
-    var modal = new bootstrap.Modal(document.getElementById('cocModal'));
-    modal.show();
-    document.getElementById('cocModalLabel').textContent = 'Chain of Custody — Case: ' + caseId;
+    var modalEl = document.getElementById('cocModal');
+    if (modalEl) new bootstrap.Modal(modalEl).show();
+    var label = document.getElementById('cocModalLabel');
+    if (label) label.textContent = 'Chain of Custody — Case: ' + caseId;
     var entriesEl = document.getElementById('coc-entries');
     var loading = document.getElementById('coc-loading');
+    if (!entriesEl) return;
     entriesEl.innerHTML = '';
-    loading.textContent = 'Gathering CoC entries for case…';
+    if (loading) loading.textContent = 'Gathering CoC entries for case…';
 
-    var rows = Array.from(document.querySelectorAll('tr[data-artifact-id]'));
-    var artifactIds = rows.map(function(r){ return r.getAttribute('data-artifact-id'); }).filter(Boolean);
+    // find artifact ids from rows:
+    var rows = Array.from(document.querySelectorAll('tr[id^="row-"], tr[data-artifact-id]'));
+    var artifactIds = rows.map(function(r){
+      if (r.getAttribute('data-artifact-id')) return r.getAttribute('data-artifact-id');
+      var id = r.id || '';
+      if (id && id.indexOf('row-') === 0) return id.replace(/^row-/, '');
+      return null;
+    }).filter(Boolean);
+
     var combined = [];
     for (var i=0;i<artifactIds.length;i++) {
       var art = artifactIds[i];
@@ -460,7 +488,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     if (combined.length === 0) {
       entriesEl.innerHTML = '<div class="small text-muted">No CoC entries found for case.</div>';
-      loading.textContent = '';
+      if (loading) loading.textContent = '';
       return;
     }
 
@@ -476,12 +504,12 @@ document.addEventListener('DOMContentLoaded', function () {
       entriesEl.appendChild(el);
     });
 
-    loading.textContent = '';
+    if (loading) loading.textContent = '';
   });
 
   // Coc modal refresh button logic
   document.getElementById('coc-refresh-btn')?.addEventListener('click', function(){
-    var title = document.getElementById('cocModalLabel').textContent || '';
+    var title = document.getElementById('cocModalLabel')?.textContent || '';
     if (title.indexOf('Artifact:') !== -1) {
       var art = title.split('Artifact:').pop().trim();
       var caseId = (new URLSearchParams(window.location.search)).get('case_id') || document.querySelector('select[name="case_id"]')?.value || 'case001';
@@ -506,5 +534,3 @@ document.addEventListener('DOMContentLoaded', function () {
   };
 
 }); // DOMContentLoaded end
-
-

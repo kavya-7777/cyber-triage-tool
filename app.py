@@ -29,7 +29,7 @@ except Exception:
 
 
 # utils for file saves (keeps existing behavior)
-from modules.utils import save_uploaded_file, iso_time_now
+from modules.utils import save_uploaded_file, iso_time_now, add_coc_entry
 from werkzeug.exceptions import RequestEntityTooLarge
 from modules.hashing import compute_sha256, update_artifact_hash
 from modules.ioc import check_iocs_for_artifact
@@ -809,6 +809,14 @@ def upload_file():
     try:
         sha256_hex, _ = compute_sha256(metadata["saved_path"])
         update_artifact_hash(case_id, metadata["artifact_id"], sha256_hex)
+
+        # --- NEW: record CoC entry for upload action ---
+        try:
+            from modules.utils import add_coc_entry
+            add_coc_entry(db, case_id, metadata["artifact_id"], actor=metadata.get("uploaded_by", "uploader"), action="uploaded", location="uploader", details={"sha256": sha256_hex})
+        except Exception:
+            logger.exception("Failed to create CoC entry for upload %s/%s", case_id, metadata.get("artifact_id"))
+
 
         # add sha256 to the metadata that we return to the client
         metadata["sha256"] = sha256_hex
@@ -1635,11 +1643,53 @@ def api_coc_add():
 
 @app.route("/api/coc/<case_id>/<artifact_id>", methods=["GET"])
 def api_coc_get(case_id, artifact_id):
+    """
+    Resilient CoC GET: try ORM first; if that returns nothing or fails, fallback to direct sqlite query.
+    """
     try:
-        rows = ChainOfCustody.query.filter_by(case_id=case_id, artifact_id=artifact_id).order_by(ChainOfCustody.ts.asc()).all()
-        return jsonify([r.to_dict() for r in rows])
+        # lazy import (safe)
+        from modules.models import ChainOfCustody
+        logger.info("api_coc_get ORM attempt for %s / %s", case_id, artifact_id)
+        try:
+            rows = ChainOfCustody.query.filter_by(case_id=case_id, artifact_id=artifact_id).order_by(ChainOfCustody.ts.asc()).all()
+            out = [r.to_dict() for r in rows]
+            logger.info("ORM returned %d rows", len(out))
+            if out:
+                return jsonify(out)
+            # else fall through to sqlite fallback
+        except Exception:
+            logger.exception("ORM query failed; falling back to sqlite")
     except Exception:
-        logger.exception("Failed to fetch CoC entries for %s/%s", case_id, artifact_id)
+        logger.exception("Importing ChainOfCustody failed; falling back to sqlite")
+
+    # ---------- sqlite fallback ----------
+    try:
+        import sqlite3, os, json
+        db_path = os.path.join(PROJECT_ROOT, "data", "triage.db")
+        con = sqlite3.connect(db_path)
+        cur = con.cursor()
+        cur.execute("SELECT id, ts, case_id, artifact_id, actor, action, details, signature FROM chain_of_custody WHERE case_id=? AND artifact_id=? ORDER BY ts ASC", (case_id, artifact_id))
+        rows = []
+        for id_, ts, caseid, aid, actor, action, details, signature in cur.fetchall():
+            try:
+                det = json.loads(details) if details else None
+            except Exception:
+                det = details
+            rows.append({
+                "id": id_,
+                "ts": ts,
+                "case_id": caseid,
+                "artifact_id": aid,
+                "actor": actor,
+                "action": action,
+                "details": det,
+                "signature": signature
+            })
+        con.close()
+        logger.info("sqlite fallback returned %d rows", len(rows))
+        return jsonify(rows)
+    except Exception:
+        logger.exception("sqlite fallback failed for CoC get %s/%s", case_id, artifact_id)
         return jsonify({"error": "failed to fetch"}), 500
 
 
@@ -1685,24 +1735,76 @@ def api_coc_verify(case_id, artifact_id):
         elif computed_sha is not None:
             record_audit(db, case_id, artifact_id, "system:verifier", "hash_ok", {"sha256": computed_sha})
 
+        # --- NEW: add Chain-of-Custody entry reflecting verification result ---
+        try:
+            from modules.utils import add_coc_entry
+            coc_action = "metadata_verified" if ok else "metadata_tampered"
+            coc_details = details if isinstance(details, dict) else {"details": details}
+            add_coc_entry(db, case_id, artifact_id, actor="system:verifier", action=coc_action, location="server", details=coc_details)
+        except Exception:
+            logger.exception("Failed to create CoC entry after verification for %s/%s", case_id, artifact_id)
+
         return jsonify(result)
 
     except Exception:
         logger.exception("Verification endpoint failed for %s/%s", case_id, artifact_id)
         return jsonify({"error": "verification failed"}), 500
 
+# add near other route handlers in app.py (replace any existing view_case_coc)
+from flask import render_template
+from modules.models import ChainOfCustody  # already imported earlier in your file
+import sqlite3, json
+
 @app.route("/coc/case/<case_id>")
 def view_case_coc(case_id):
     """
     Render case-level Chain-of-Custody / audit entries aggregated for the case.
+    This is defensive: it queries DB rows and converts them to plain dicts for the template.
     """
     try:
-        rows = ChainOfCustody.query.filter_by(case_id=case_id).order_by(ChainOfCustody.ts.asc()).all()
-        # Convert rows to dicts for template
-        entries = [r.to_dict() for r in rows]
+        # Primary: query ChainOfCustody ORM rows if model is available
+        try:
+            rows = ChainOfCustody.query.filter_by(case_id=case_id).order_by(ChainOfCustody.ts.asc()).all()
+            entries = [r.to_dict() if hasattr(r, "to_dict") else {
+                "id": getattr(r, "id", None),
+                "ts": getattr(r, "ts", None).isoformat() + "Z" if getattr(r, "ts", None) else None,
+                "case_id": getattr(r, "case_id", None),
+                "artifact_id": getattr(r, "artifact_id", None),
+                "actor": getattr(r, "actor", None),
+                "action": getattr(r, "action", None),
+                "details": (json.loads(getattr(r, "details")) if getattr(r, "details") else None)
+            } for r in rows]
+        except Exception:
+            # If ORM call fails for some reason, fallback to direct sqlite query (robust)
+            entries = []
+            db_path = os.path.join(PROJECT_ROOT, "data", "triage.db")
+            try:
+                con = sqlite3.connect(db_path)
+                cur = con.cursor()
+                cur.execute("SELECT id, ts, case_id, artifact_id, actor, action, details FROM chain_of_custody WHERE case_id=? ORDER BY ts ASC", (case_id,))
+                for id_, ts, caseid, aid, actor, action, details in cur.fetchall():
+                    # normalize details (try parse json)
+                    try:
+                        d = json.loads(details) if details else None
+                    except Exception:
+                        d = details
+                    entries.append({
+                        "id": id_,
+                        "ts": ts,
+                        "case_id": caseid,
+                        "artifact_id": aid,
+                        "actor": actor,
+                        "action": action,
+                        "details": d
+                    })
+                con.close()
+            except Exception:
+                entries = []
+
         return render_template("coc_case.html", case_id=case_id, entries=entries)
     except Exception:
         logger.exception("Failed to render case-level CoC for %s", case_id)
+        # render template but ensure entries is a list (template handles empty)
         return render_template("coc_case.html", case_id=case_id, entries=[]), 500
 
 

@@ -6,6 +6,9 @@ import logging
 import hmac
 import hashlib
 import base64
+import tempfile
+import shutil
+from glob import glob
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from typing import Tuple
@@ -317,3 +320,70 @@ def normalize_metadata_dict(meta):
     if meta.get("analysis") is None or not isinstance(meta.get("analysis"), dict):
         meta["analysis"] = {}
     return meta
+
+# modules/utils.py  (append near other helpers)
+def add_coc_entry(db, case_id, artifact_id, actor="system", action="access", from_entity=None, to_entity=None, reason=None, location=None, details=None):
+    """
+    Create a ChainOfCustody DB row AND append to on-disk artifact metadata (signed) if present.
+    db: SQLAlchemy db instance (modules.db.db)
+    Returns the created DB row id and signature string.
+    """
+    try:
+        from modules.models import ChainOfCustody
+        payload = {
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "case_id": case_id,
+            "artifact_id": artifact_id,
+            "actor": actor,
+            "action": action,
+            "from": from_entity,
+            "to": to_entity,
+            "reason": reason,
+            "location": location,
+            "details": details
+        }
+        # compute signature
+        sig = hmac_for_obj(payload, key=COC_HMAC_KEY)
+
+        # DB insert
+        coc = ChainOfCustody(
+            case_id=case_id,
+            artifact_id=artifact_id,
+            actor=actor,
+            action=action,
+            from_entity=from_entity,
+            to_entity=to_entity,
+            reason=reason,
+            location=location,
+            details=json.dumps(details) if details else None,
+            signature=sig
+        )
+        db.session.add(coc)
+        db.session.commit()
+
+        # append to artifact metadata JSON on disk if exists
+        try:
+            _, artifacts_dir = ensure_case_dirs(case_id)
+            meta_path = os.path.join(artifacts_dir, f"{artifact_id}.json")
+            if os.path.exists(meta_path):
+                meta = load_signed_metadata_safe(meta_path)
+                meta = normalize_metadata_dict(meta)
+                meta.setdefault("analysis", {}).setdefault("coc", [])
+                entry = dict(payload)
+                entry["signature"] = sig
+                meta["analysis"]["coc"].append(entry)
+                try:
+                    write_signed_metadata(meta_path, meta)
+                except Exception:
+                    atomic_write_json(meta_path, meta)
+        except Exception:
+            logger.exception("Failed to append CoC to artifact JSON for %s/%s", case_id, artifact_id)
+
+        return coc.id, sig
+    except Exception:
+        logger.exception("add_coc_entry failed for %s/%s", case_id, artifact_id)
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        raise
