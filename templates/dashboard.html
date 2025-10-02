@@ -358,8 +358,15 @@
               <a class="btn btn-sm btn-outline-danger" href="{{ url_for('api_yara_check', case_id=case_id, artifact_id=a.artifact_id) }}">Re-run YARA</a>
 
               <div class="mt-2 d-flex gap-1">
-                <button class="btn btn-sm btn-outline-success verify-btn" data-case="{{ case_id }}" data-art="{{ aid }}">Verify</button>
-                <button class="btn btn-sm btn-outline-secondary coc-btn" data-case="{{ case_id }}" data-art="{{ aid }}">CoC</button>
+                <button type="button" class="btn btn-sm btn-outline-success verify-btn"
+                        data-case="{{ case_id }}" data-art="{{ aid }}">
+                  Verify
+                </button>
+
+                <button type="button" class="btn btn-sm btn-outline-secondary coc-btn"
+                        data-case="{{ case_id }}" data-art="{{ aid }}">
+                  CoC
+                </button>
               </div>
 
               <div class="mt-2 small" id="verify-result-{{ aid }}"></div>
@@ -427,6 +434,7 @@
 {# Inline JS: verify, show CoC, populate Why modal, animate bars #}
 <script>
 (function(){
+  
   // Helper: small DOM create
   function e(tag, attrs) {
     const el = document.createElement(tag);
@@ -444,44 +452,71 @@
   }
 
   // Verify handler
-  async function doVerify(caseId, artId, statusEl){
-    statusEl.textContent = 'Checking…';
-    statusEl.style.color = '';
+  // Verify handler (guarded against duplicates)
+  const __verifyInFlight = new Map(); // key: caseId+artId -> true
+
+  async function doVerify(caseId, artId, statusEl, callerTag) {
+    // guard key
+    const key = `${caseId}::${artId}`;
+
+    // If already in-flight, skip and log origin
+    if (__verifyInFlight.get(key) === true) {
+      console.warn(`doVerify skipped (in-flight) for ${key} — caller=${callerTag || 'unknown'}`);
+      // optionally show small UI hint
+      if (statusEl) {
+        const existing = statusEl.getAttribute('data-verify-recent') || '';
+        statusEl.setAttribute('data-verify-recent', (existing + '●').slice(-5));
+      }
+      return;
+    }
+
+    __verifyInFlight.set(key, true);
+    if (statusEl) { statusEl.textContent = 'Checking…'; statusEl.style.color = ''; }
+
     try {
+      // Add small caller info to debug logs (useful when diagnosing double initiators)
+      console.log('verify request start', { caseId, artId, callerTag, ts: new Date().toISOString() });
+
       const resp = await fetch(`/api/coc/verify/${encodeURIComponent(caseId)}/${encodeURIComponent(artId)}`);
-      const body = await resp.json();
+      let body;
+      try { body = await resp.json(); } catch (_) { body = await resp.text(); }
+
       if (!resp.ok) {
-        statusEl.innerHTML = `<span style="color:orange">verify failed</span>`;
+        if (statusEl) statusEl.innerHTML = `<span style="color:orange">verify failed</span>`;
         console.warn('verify failed', body);
         return;
       }
 
-      const ok = body.metadata_hmac_ok === true;
-      const onDisk = body.on_disk_sha256 || null;
-      const computed = body.computed_sha256 || null;
+      const ok = (body && body.metadata_hmac_ok === true);
+      const onDisk = body && (body.on_disk_sha256 || null);
+      const computed = body && (body.computed_sha256 || null);
 
       if (!ok) {
-        statusEl.innerHTML = `<strong style="color:#c00">META TAMPERED ✖</strong>`;
-        statusEl.title = JSON.stringify(body.metadata_hmac_details || {}, null, 2);
+        if (statusEl) {
+          statusEl.innerHTML = `<strong style="color:#c00">META TAMPERED ✖</strong>`;
+          statusEl.title = JSON.stringify(body.metadata_hmac_details || {}, null, 2);
+        }
         return;
       }
 
-      // metadata signature ok
       if (onDisk && computed) {
         if (onDisk === computed) {
-          statusEl.innerHTML = `<strong style="color:green">OK ✔</strong>`;
-          statusEl.title = `sha256: ${computed}`;
+          if (statusEl) { statusEl.innerHTML = `<strong style="color:green">OK ✔</strong>`; statusEl.title = `sha256: ${computed}`; }
         } else {
-          statusEl.innerHTML = `<strong style="color:#c00">HASH MISMATCH ✖</strong>`;
-          statusEl.title = `manifest: ${onDisk}\ncomputed: ${computed}`;
+          if (statusEl) { statusEl.innerHTML = `<strong style="color:#c00">HASH MISMATCH ✖</strong>`; statusEl.title = `manifest: ${onDisk}\ncomputed: ${computed}`; }
         }
       } else {
-        statusEl.innerHTML = `<strong style="color:green">META OK</strong>`;
-        if (onDisk) statusEl.title = `manifest sha: ${onDisk}`;
+        if (statusEl) { statusEl.innerHTML = `<strong style="color:green">META OK</strong>`; if (onDisk) statusEl.title = `manifest sha: ${onDisk}`; }
       }
     } catch (err) {
-      console.error(err);
-      statusEl.innerHTML = `<span style="color:orange">error</span>`;
+      console.error('doVerify error', err);
+      if (statusEl) statusEl.innerHTML = `<span style="color:orange">error</span>`;
+    } finally {
+      // release guard after short delay so UI has time to update
+      setTimeout(() => {
+        __verifyInFlight.delete(key);
+        if (statusEl) { statusEl.setAttribute('data-verify-recent', ''); }
+      }, 300); // 300ms window — adjust if desired
     }
   }
 
@@ -606,14 +641,21 @@
     });
   }
 
-  // Wire up verify and CoC buttons using event delegation
+    // Wire up verify and CoC buttons using event delegation
   document.addEventListener('click', function(ev){
     const vb = ev.target.closest('.verify-btn');
     if (vb) {
+      // marker to show this element had a delegated click processed
+      vb.setAttribute('data-delegated', '1');
+
       const caseId = vb.getAttribute('data-case');
       const artId = vb.getAttribute('data-art');
       const resultEl = document.getElementById('verify-result-' + artId);
-      doVerify(caseId, artId, resultEl);
+
+      // prefer to pass a callerTag to help debug duplicate initiators
+      // we detect if click had an explicit data-caller set (e.g., other modules) else mark 'dashboard'
+      const callerTag = vb.getAttribute('data-caller') || 'dashboard-inline';
+      doVerify(caseId, artId, resultEl, callerTag);
       return;
     }
     const cb = ev.target.closest('.coc-btn');
@@ -625,6 +667,7 @@
       return;
     }
   });
+
 
   // on DOM ready: animate bars + hook Why buttons
   document.addEventListener('DOMContentLoaded', function(){
@@ -640,8 +683,8 @@
 })();
 </script>
 
-{# Optionally preserve your external loader if present; keep but it won't duplicate modal behavior #}
-<script src="{{ url_for('static', filename='js/artifacts_loader.js') }}"></script>
-<script>window.addEventListener('DOMContentLoaded', function(){ if(window.ArtifactsLoader) window.ArtifactsLoader.init("{{ case_id }}"); });</script>
+<!-- {# Optionally preserve your external loader if present; keep but it won't duplicate modal behavior #} -->
+<!-- <script src="{{ url_for('static', filename='js/artifacts_loader.js') }}"></script> -->
+<!-- <script>window.addEventListener('DOMContentLoaded', function(){ if(window.ArtifactsLoader) window.ArtifactsLoader.init("{{ case_id }}"); });</script> -->
 
 {% endblock %}

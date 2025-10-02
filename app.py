@@ -1,5 +1,5 @@
 # app.py
-from flask import Flask, render_template, request, redirect, url_for, jsonify, send_file, abort, flash, make_response
+from flask import Flask, render_template, request, redirect, url_for, jsonify, send_file, abort, flash, make_response, current_app
 import os
 import io, zipfile
 import json
@@ -17,6 +17,8 @@ from modules.utils import (
     ensure_case_dirs,
     atomic_write_json
 )
+
+import tempfile
 
 from modules.models import ChainOfCustody
 
@@ -1459,6 +1461,24 @@ def _render_report_html(case_id):
         logger.exception("Failed to render report template for PDF generation")
         raise
 
+@app.route("/report/bundle/<case_id>")
+def report_bundle_redirect(case_id):
+    """
+    Temporary compatibility redirect: forward legacy /report/bundle/<case_id>
+    to the new blueprint-based route that generates/serves the zip.
+    """
+    # sanitize a bit
+    try:
+        safe = safe_case_id(case_id)
+    except Exception:
+        safe = None
+    if not safe:
+        return jsonify({"error": "invalid case id"}), 400
+
+    # redirect to blueprint route (permanent if you want)
+    return redirect(url_for("reporting.report_bundle", case_id=safe), code=302)
+
+
 @app.route("/report/pdf/<case_id>")
 def report_pdf(case_id):
     """
@@ -1521,32 +1541,95 @@ def report_pdf(case_id):
 
 @app.route("/report/bundle/<case_id>")
 def report_bundle(case_id):
-    pdf_candidates = [
-        os.path.join("data", case_id, "report.pdf"),
-        os.path.join("data", f"{case_id}_report.pdf"),
-        os.path.join("/mnt/data", f"{case_id}_report.pdf"),
-    ]
-    pdf_path = next((p for p in pdf_candidates if os.path.exists(p)), None)
+    """
+    Serve an existing case zip if present, otherwise build a zip containing
+    report.pdf and manifest.json (and small helpful files) on demand.
+    """
+    import glob, tempfile, shutil
+    try:
+        # 1) Look for an existing zip (many likely names / locations)
+        candidates = []
+        candidates += glob.glob(os.path.join(DATA_DIR, case_id, f"*{case_id}*.zip"))
+        candidates.append(os.path.join(DATA_DIR, case_id, f"{case_id}_package.zip"))
+        candidates.append(os.path.join(DATA_DIR, case_id, f"{case_id}_report.zip"))
+        candidates.append(os.path.join(DATA_DIR, f"{case_id}_package.zip"))
+        candidates.append(os.path.join(PROJECT_ROOT, f"{case_id}_package.zip"))
+        candidates.append(os.path.join(PROJECT_ROOT, f"{case_id}_report.zip"))
+        candidates.append(os.path.join("/mnt/data", f"{case_id}_package.zip"))
+        candidates.append(os.path.join("/tmp", f"{case_id}_package.zip"))
 
-    manifest_path = os.path.join("data", case_id, "manifest.json")
-    if not os.path.exists(manifest_path):
-        manifest_path = None
+        # flatten & dedupe
+        seen = set(); cand_list = []
+        for c in candidates:
+            if isinstance(c, (list, tuple)):
+                for x in c:
+                    if x and x not in seen:
+                        seen.add(x); cand_list.append(x)
+            else:
+                if c and c not in seen:
+                    seen.add(c); cand_list.append(c)
 
-    if not pdf_path and not manifest_path:
-        return jsonify({"error": "no report or manifest found"}), 404
+        for p in cand_list:
+            try:
+                if p and os.path.exists(p) and os.path.getsize(p) > 0:
+                    current_app.logger.info("Found existing zip for %s -> %s", case_id, p)
+                    try:
+                        return send_file(p, as_attachment=True, download_name=os.path.basename(p))
+                    except TypeError:
+                        return send_file(p, as_attachment=True, attachment_filename=os.path.basename(p))
+            except Exception:
+                continue
 
-    mem = io.BytesIO()
-    with zipfile.ZipFile(mem, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        if pdf_path:
-            zf.write(pdf_path, arcname=os.path.basename(pdf_path))
-        if manifest_path:
-            zf.write(manifest_path, arcname=os.path.basename(manifest_path))
-    mem.seek(0)
+        # 2) No pre-built zip found -> assemble from PDF + manifest
+        pdf_candidates = [
+            os.path.join(DATA_DIR, case_id, "report.pdf"),
+            os.path.join(DATA_DIR, f"{case_id}_report.pdf"),
+            os.path.join(PROJECT_ROOT, f"{case_id}_report.pdf"),
+            os.path.join("/mnt/data", f"{case_id}_report.pdf"),
+            os.path.join("/tmp", f"{case_id}_report.pdf"),
+        ]
+        pdf_path = next((p for p in pdf_candidates if p and os.path.exists(p) and os.path.getsize(p) > 0), None)
+        manifest_path = os.path.join(DATA_DIR, case_id, "manifest.json")
+        if not (manifest_path and os.path.exists(manifest_path) and os.path.getsize(manifest_path) > 0):
+            manifest_path = None
 
-    resp = make_response(mem.read())
-    resp.headers.set("Content-Type", "application/zip")
-    resp.headers.set("Content-Disposition", f"attachment; filename={case_id}_report_bundle.zip")
-    return resp
+        if not pdf_path and not manifest_path:
+            current_app.logger.warning("report_bundle: no pdf or manifest or zip found for %s", case_id)
+            return jsonify({"error": "no report or manifest found"}), 404
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            pkg_dir = os.path.join(tmpd, "package_contents")
+            os.makedirs(pkg_dir, exist_ok=True)
+            if pdf_path:
+                try: shutil.copy2(pdf_path, os.path.join(pkg_dir, os.path.basename(pdf_path)))
+                except Exception: current_app.logger.exception("Failed to copy pdf into temp package for %s", case_id)
+            if manifest_path:
+                try: shutil.copy2(manifest_path, os.path.join(pkg_dir, os.path.basename(manifest_path)))
+                except Exception: current_app.logger.exception("Failed to copy manifest into temp package for %s", case_id)
+
+            # include small JSON/log files
+            small_exts = ("*.log", "*.json", "*.txt")
+            case_folder = os.path.join(DATA_DIR, case_id)
+            if os.path.exists(case_folder):
+                import glob
+                for ext in small_exts:
+                    for f in glob.glob(os.path.join(case_folder, ext)):
+                        try:
+                            if os.path.getsize(f) < 5 * 1024 * 1024:
+                                shutil.copy2(f, os.path.join(pkg_dir, os.path.basename(f)))
+                        except Exception:
+                            continue
+
+            zip_out = os.path.join(tmpd, f"{case_id}_package.zip")
+            archive = shutil.make_archive(zip_out.replace(".zip", ""), 'zip', root_dir=pkg_dir)
+            try:
+                return send_file(archive, as_attachment=True, download_name=os.path.basename(archive))
+            except TypeError:
+                return send_file(archive, as_attachment=True, attachment_filename=os.path.basename(archive))
+
+    except Exception as e:
+        current_app.logger.exception("report_bundle error for %s: %s", case_id, e)
+        return jsonify({"error": "failed to prepare bundle", "details": str(e)}), 500
 
 
 @app.route("/heuristics", methods=["GET", "POST"])
@@ -2194,6 +2277,7 @@ def api_coc_verify(case_id, artifact_id):
             coc_action = "metadata_verified" if ok else "metadata_tampered"
             coc_details = details if isinstance(details, dict) else {"details": details}
             add_coc_entry(db, case_id, artifact_id, actor="system:verifier", action=coc_action, location="server", details=coc_details)
+            
         except Exception:
             logger.exception("Failed to create CoC entry after verification for %s/%s", case_id, artifact_id)
 
