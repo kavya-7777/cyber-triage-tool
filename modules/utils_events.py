@@ -108,4 +108,17 @@ def append_event(case_id: str, artifacts):
         pass
 
     atomic_write(p, ev)
+     # --- NEW: invalidate any cached timeline.json so timeline builder will rebuild ---
+    try:
+        timeline_path = os.path.join(os.path.dirname(p), "timeline.json")
+        if os.path.exists(timeline_path):
+            try:
+                os.remove(timeline_path)
+            except Exception:
+                # best-effort only — don't raise
+                pass
+    except Exception:
+        # defensive; nothing critical if invalidation fails
+        pass
+    
     return event

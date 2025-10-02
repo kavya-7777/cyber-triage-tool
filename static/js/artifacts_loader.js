@@ -288,6 +288,26 @@ window.ArtifactsLoader = (function(){
       });
     }, 80);
 
+        // --- show the Why? modal (ensure bootstrap is loaded) ---
+    try {
+      var modalEl = document.getElementById('whyModal');
+      if (modalEl) {
+        if (window.bootstrap && typeof bootstrap.Modal === 'function') {
+          // get or create modal instance and show it
+          var modalInstance = bootstrap.Modal.getOrCreateInstance(modalEl);
+          modalInstance.show();
+        } else {
+          // bootstrap not available yet — log a helpful message
+          console.warn("Bootstrap Modal API not available; ensure bootstrap.bundle.js is loaded before artifact_loader.js");
+        }
+      } else {
+        console.debug("whyModal element not found in DOM; cannot open modal");
+      }
+    } catch (e) {
+      console.debug("Failed to show why modal", e);
+    }
+
+
   }, 200)); // debounce 200ms
 
 })();

@@ -1,0 +1,116 @@
+﻿{
+  "artifact_id": "3d4ea65c3e89416687545b59fe5a510b",
+  "original_filename": "fix.txt",
+  "saved_filename": "3d4ea65c3e89416687545b59fe5a510b__fix.txt",
+  "saved_path": "evidence\\case001\\artifacts\\3d4ea65c3e89416687545b59fe5a510b__fix.txt",
+  "case_id": "case001",
+  "uploaded_by": "investigator",
+  "uploaded_at": "2025-10-02T09:22:39Z",
+  "size_bytes": 39,
+  "analysis": {
+    "integrity": [
+      {
+        "sha256": "caca8e983b56836b0d9cca25cb2428a01ad8d8335dd415b8a92d50d81acbe80f",
+        "recorded_at": "2025-10-02T09:22:39Z",
+        "recorded_by": "system"
+      }
+    ],
+    "latest_sha256": "caca8e983b56836b0d9cca25cb2428a01ad8d8335dd415b8a92d50d81acbe80f",
+    "coc": [
+      {
+        "ts": "2025-10-02T09:22:39.198649Z",
+        "case_id": "case001",
+        "artifact_id": "3d4ea65c3e89416687545b59fe5a510b",
+        "actor": "investigator",
+        "action": "uploaded",
+        "from": null,
+        "to": null,
+        "reason": null,
+        "location": "uploader",
+        "details": {
+          "sha256": "caca8e983b56836b0d9cca25cb2428a01ad8d8335dd415b8a92d50d81acbe80f"
+        },
+        "signature": "8a1b3b161421abff4de890ed9fed9151287f1217d3c97fb4685ce512e17563d2"
+      }
+    ],
+    "ioc_matches": [],
+    "yara_matches": [],
+    "heuristics": {
+      "path": "evidence\\case001\\artifacts\\3d4ea65c3e89416687545b59fe5a510b__fix.txt",
+      "filename": "3d4ea65c3e89416687545b59fe5a510b__fix.txt",
+      "size": 39,
+      "scanned_bytes": 39,
+      "entropy": 2.5912150954349626,
+      "entropy_level": "normal",
+      "printable_ratio": 1.0,
+      "top_bytes": [
+        {
+          "byte": 104,
+          "hex": "0x68",
+          "count": 11
+        },
+        {
+          "byte": 32,
+          "hex": "0x20",
+          "count": 8
+        },
+        {
+          "byte": 109,
+          "hex": "0x6d",
+          "count": 6
+        },
+        {
+          "byte": 111,
+          "hex": "0x6f",
+          "count": 6
+        },
+        {
+          "byte": 121,
+          "hex": "0x79",
+          "count": 4
+        }
+      ],
+      "filename_suspicious": true,
+      "filename_reasons": [
+        "contains long hex/hex-like sequence",
+        "high filename entropy (4.14)"
+      ],
+      "path_suspicious": false,
+      "path_reasons": [],
+      "is_pe": false,
+      "pe_signed_check": {
+        "signed": null,
+        "reason": "not a PE/Windows executable"
+      },
+      "unsigned_executable": false,
+      "component_scores": {
+        "entropy_component": 16,
+        "filename_component": 70,
+        "pe_component": 0
+      },
+      "reasons": [
+        "contains long hex/hex-like sequence",
+        "high filename entropy (4.14)"
+      ],
+      "suspicion_score": 28
+    },
+    "final_score": 7,
+    "final_breakdown": {
+      "ioc_component": 0,
+      "yara_component": 0,
+      "heuristics_component": 29,
+      "reputation_component": 0
+    },
+    "final_reasons": [
+      "contains long hex/hex-like sequence",
+      "high filename entropy (4.14)",
+      "heuristics components (entropy=16, filename=70, pe=0)"
+    ]
+  },
+  "sha256": "caca8e983b56836b0d9cca25cb2428a01ad8d8335dd415b8a92d50d81acbe80f",
+  "_meta": {
+    "hmac": "8ca626daf365b95aa84bd30aaec764e76093aa8d084b249b9b7ec0f66615c111",
+    "hmac_algo": "sha256",
+    "hmac_at": "2025-10-02T09:22:39Z"
+  }
+}

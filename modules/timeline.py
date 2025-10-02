@@ -151,9 +151,12 @@ def load_events_json(path: str) -> List[Dict[str, Any]]:
         print(f"Warning: events file not found: {path}", file=sys.stderr)
         return events
 
+    # Accept either {"timeline_preview": [...]} or {"events": [...]} or a bare list
     arr = None
     if isinstance(data, dict):
-        if isinstance(data.get("events"), list):
+        if isinstance(data.get("timeline_preview"), list):
+            arr = data["timeline_preview"]
+        elif isinstance(data.get("events"), list):
             arr = data["events"]
         else:
             for v in data.values():
@@ -184,14 +187,76 @@ def load_events_json(path: str) -> List[Dict[str, Any]]:
         except Exception as ex:
             print(f"Warning: cannot parse events.json timestamp '{ts_raw}': {ex}", file=sys.stderr)
             ts_dt = None
+
+        # Base event
         ev = {
             "id": (item.get("id") if isinstance(item, dict) else None) or str(uuid.uuid4()),
-            "source": "events.json",
+            "source": (item.get("source") if isinstance(item, dict) else "events.json"),
             "type": (item.get("type") if isinstance(item, dict) else "event") or "event",
             "details": item if isinstance(item, dict) else {"value": item},
             "timestamp_dt": ts_dt,
         }
+
+        # Special-case expansion: accept nested forms like:
+        # item["details"]["details"]["artifacts"]  (your current observed shape)
+        try:
+            details = ev.get("details") or {}
+            inner = None
+            # common candidate locations to find artifacts list:
+            if isinstance(details, dict):
+                if isinstance(details.get("details"), dict) and isinstance(details["details"].get("artifacts"), list):
+                    inner = details["details"]
+                elif isinstance(details.get("artifacts"), list):
+                    inner = details
+                elif isinstance(item.get("artifacts"), list):
+                    inner = item
+            if inner and isinstance(inner.get("artifacts"), list):
+                for art_wrapper in inner.get("artifacts", []):
+                    try:
+                        # artifact might be inside {"artifact": {...}, "note":..., "type": ...}
+                        art_obj = None
+                        summary = None
+                        if isinstance(art_wrapper, dict) and art_wrapper.get("artifact"):
+                            art_obj = art_wrapper.get("artifact")
+                        elif isinstance(art_wrapper, dict) and art_wrapper.get("summary"):
+                            summary = art_wrapper.get("summary")
+                            art_obj = art_wrapper.get("artifact") or {}
+                        else:
+                            art_obj = art_wrapper if isinstance(art_wrapper, dict) else {}
+
+                        # build a compact summary (UI-friendly)
+                        if not summary:
+                            summary = {
+                                "artifact_id": (art_obj or {}).get("artifact_id") or (art_obj or {}).get("id"),
+                                "filename": (art_obj or {}).get("original_filename") or (art_obj or {}).get("saved_filename"),
+                                "saved_filename": (art_obj or {}).get("saved_filename"),
+                                "size_bytes": (art_obj or {}).get("size_bytes"),
+                                "final_score": ((art_obj or {}).get("analysis") or {}).get("final_score")
+                            }
+
+                        single = {
+                            "id": (art_wrapper.get("id") if isinstance(art_wrapper, dict) and art_wrapper.get("id") else str(uuid.uuid4())),
+                            "source": "events.json",
+                            "type": art_wrapper.get("type") or "artifact_uploaded",
+                            "timestamp_dt": ts_dt,
+                            "timestamp": ts_dt.isoformat() if ts_dt else None,
+                            "case_id": inner.get("case_id") or item.get("case_id") or None,
+                            "artifact_id": summary.get("artifact_id"),
+                            "summary": summary,
+                            "details": art_obj or art_wrapper
+                        }
+                        events.append(single)
+                    except Exception:
+                        # skip malformed artifact entries but continue
+                        continue
+                # expanded all artifacts for this top-level item
+                continue
+        except Exception:
+            # ignore expansion errors and fall back to the raw event
+            pass
+
         events.append(ev)
+
     return events
 
 

@@ -1,6 +1,7 @@
 # app.py
-from flask import Flask, render_template, request, redirect, url_for, jsonify, send_file, abort, flash
+from flask import Flask, render_template, request, redirect, url_for, jsonify, send_file, abort, flash, make_response
 import os
+import io, zipfile
 import json
 import uuid
 from datetime import datetime, timezone
@@ -35,6 +36,7 @@ from modules.hashing import compute_sha256, update_artifact_hash
 from modules.ioc import check_iocs_for_artifact
 from modules.yara import scan_artifact as yara_scan_artifact, compile_rules as yara_compile_rules
 from modules import utils_events
+from modules.reporting import register_reporting_routes
 
 import shutil
 
@@ -56,7 +58,6 @@ ALLOWED_EXTENSIONS = None  # change to a set like {'exe','txt'} to restrict
 # (optional) configure input file locations if not default
 app.config['TIMELINE_PROCESSES_PATH'] = 'data/processes.csv'
 app.config['TIMELINE_EVENTS_PATH'] = 'data/events.json'
-
 
 # Setup basic logging
 import logging
@@ -89,6 +90,9 @@ with app.app_context():
     db.create_all()
     Case = models.Case
     Artifact = models.Artifact
+
+# Register reporting blueprint (for PDF + ZIP report downloads)
+register_reporting_routes(app)
 
 # --- safe import & register of timeline blueprint (idempotent) ---
 try:
@@ -369,6 +373,7 @@ def upload_file():
                 # don't abort processing if normalization fails; log and continue
                 logger.exception("Failed to normalize extracted metadata for case %s", case_id)
 
+            seen_extracted_ids = set()
             per_file_results = []
             for path in extracted_paths:
                 try:
@@ -479,9 +484,6 @@ def upload_file():
                         # If artifact_id already exists in DB for this case, generate a new unique id.
                         # Also track ids we've created during this upload so we don't reuse them.
                         from modules.models import Artifact as DBArtifact
-                        # initialize session-local seen set if not present
-                        if 'seen_extracted_ids' not in locals():
-                            seen_extracted_ids = set()
 
                         need_new_id = False
                         # If artifact_id already present in DB, we'll need a fresh id
@@ -733,6 +735,18 @@ def upload_file():
                 if process_extracted_files:
                     summary = process_extracted_files(case_id, extracted_paths)
                     logger.info("Case-level timeline files created: %s", summary)
+                    try:
+                        utils_events.append_event(case_id, {
+                            "type": "zip_ingest",
+                            "details": {
+                                "processed_count": summary.get("processed"),
+                                "csv_rows_written": summary.get("csv_rows_written"),
+                                "events_appended": summary.get("events_appended")
+                            }
+                        })
+                    except Exception:
+                        logger.exception("Failed to append zip_ingest event for case %s", case_id)
+
                 else:
                     logger.warning("No zip -> timeline processor available; skipping creation of case-level files.")
             except Exception:
@@ -905,9 +919,6 @@ def upload_file():
                                 logger.exception("Fallback atomic write failed for heuristics metadata %s", metadata.get("artifact_id"))
                     except Exception:
                         logger.exception("Failed to write heuristics into artifact JSON on disk for %s", metadata.get("artifact_id"))
-                    except Exception:
-                        logger.exception("Failed to write heuristics into artifact JSON on disk for %s", metadata.get("artifact_id"))
-
                 except Exception:
                     logger.exception("Failed to persist heuristics analysis to DB for %s", metadata.get("artifact_id"))
 
@@ -1050,6 +1061,44 @@ def upload_file():
 
     manifest_count = len(manifest.get("artifacts", [])) if isinstance(manifest, dict) else 0
 
+    # --- PUBLISH: append a timeline event for this uploaded artifact (non-blocking) ---
+    try:
+        ev = {
+            "artifact_id": metadata.get("artifact_id"),
+            "original_filename": metadata.get("original_filename"),
+            "saved_filename": metadata.get("saved_filename"),
+            "saved_path": metadata.get("saved_path"),
+            "size_bytes": metadata.get("size_bytes"),
+            "uploaded_by": metadata.get("uploaded_by"),
+            "uploaded_at": metadata.get("uploaded_at"),
+            "analysis": metadata.get("analysis")
+        }
+
+        # Build a small summary that the UI can render quickly
+        summary = {
+            "artifact_id": ev.get("artifact_id"),
+            "filename": ev.get("original_filename"),
+            "saved_filename": ev.get("saved_filename"),
+            "saved_path": ev.get("saved_path"),
+            "size_bytes": ev.get("size_bytes"),
+            "uploaded_by": ev.get("uploaded_by"),
+            # best-effort final_score if available
+            "final_score": (ev.get("analysis") or {}).get("final_score") or (ev.get("analysis") or {}).get("suspicion_score")
+        }
+
+        try:
+            utils_events.append_event(case_id, {
+                "type": "artifact_uploaded",
+                "artifact": ev,           # full manifest-ish object (for forensic detail)
+                "summary": summary,       # small, UI-friendly summary
+                "note": "uploaded via /upload"
+            })
+        except Exception:
+            logger.exception("Failed to append upload event to events.json for %s/%s", case_id, metadata.get("artifact_id"))
+    except Exception:
+        logger.exception("Unexpected failure while building/publishing upload event for %s/%s", case_id, metadata.get("artifact_id"))
+
+
     # Return both metadata and DB id for convenience
     return jsonify({
         "status": "saved",
@@ -1113,24 +1162,391 @@ def dashboard():
 def report():
     """
     Report preview: collect case & artifacts from DB (preferred) or manifest (fallback)
-    and render templates/report.html for preview. Later this will be converted to PDF.
+    and render templates/report.html for preview. Normalizes artifact records so the
+    template always receives consistent fields (parses JSON strings, supplies defaults).
     """
     case_id = request.args.get("case_id", "case001")
 
     # Try DB first
     case = Case.query.filter_by(case_id=case_id).first()
-    if case:
-        artifacts_rows = Artifact.query.filter_by(case_id=case_id).order_by(Artifact.uploaded_at.desc()).all()
-        artifacts = [r.to_dict() for r in artifacts_rows]
-        case_info = case.to_dict()
-    else:
-        # fallback to manifest JSON
+    artifacts_raw = []
+    case_info = {"case_id": case_id, "created_at": None, "artifact_count": 0}
+    try:
+        if case:
+            artifacts_rows = Artifact.query.filter_by(case_id=case_id).order_by(Artifact.uploaded_at.desc()).all()
+            # each row likely has a to_dict(); fallback to attribute read if not
+            for r in artifacts_rows:
+                try:
+                    d = r.to_dict() if hasattr(r, "to_dict") else {
+                        "artifact_id": getattr(r, "artifact_id", None),
+                        "original_filename": getattr(r, "original_filename", None),
+                        "saved_filename": getattr(r, "saved_filename", None),
+                        "saved_path": getattr(r, "saved_path", None),
+                        "uploaded_by": getattr(r, "uploaded_by", None),
+                        "uploaded_at": getattr(r, "uploaded_at").isoformat() + "Z" if getattr(r, "uploaded_at", None) else None,
+                        "size_bytes": getattr(r, "size_bytes", None),
+                        "analysis": getattr(r, "analysis", None)
+                    }
+                except Exception:
+                    # defensive fallback - build minimal dict
+                    d = {
+                        "artifact_id": getattr(r, "artifact_id", None),
+                        "original_filename": getattr(r, "original_filename", None),
+                        "saved_filename": getattr(r, "saved_filename", None),
+                        "saved_path": getattr(r, "saved_path", None),
+                        "uploaded_by": getattr(r, "uploaded_by", None),
+                        "uploaded_at": getattr(r, "uploaded_at").isoformat() + "Z" if getattr(r, "uploaded_at", None) else None,
+                        "size_bytes": getattr(r, "size_bytes", None),
+                        "analysis": getattr(r, "analysis", None)
+                    }
+                artifacts_raw.append(d)
+            case_info = case.to_dict() if hasattr(case, "to_dict") else {"case_id": case_id, "created_at": None, "artifact_count": len(artifacts_raw)}
+        else:
+            # fallback to manifest JSON
+            manifest = load_manifest(case_id)
+            artifacts_raw = manifest.get("artifacts", []) or []
+            case_info = {"case_id": case_id, "created_at": manifest.get("created_at"), "artifact_count": len(artifacts_raw)}
+    except Exception:
+        # On any unexpected error, fallback to manifest and continue
+        logger.exception("Error loading artifacts for report; falling back to manifest for case %s", case_id)
         manifest = load_manifest(case_id)
-        artifacts = manifest.get("artifacts", [])
-        case_info = {"case_id": case_id, "created_at": None, "artifact_count": len(artifacts)}
+        artifacts_raw = manifest.get("artifacts", []) or []
+        case_info = {"case_id": case_id, "created_at": manifest.get("created_at"), "artifact_count": len(artifacts_raw)}
 
-    # Render the report template (report.html) with structured data
-    return render_template("report.html", case_id=case_id, case_info=case_info, artifacts=artifacts)
+    # Normalize artifacts into a predictable shape for the template
+    artifacts = []
+    for a in artifacts_raw:
+        try:
+            # a may be a DB-to_dict (dict), or manifest dict; analysis may be a JSON-string or dict
+            art = dict(a) if isinstance(a, dict) else {}
+
+            # ensure keys exist
+            artifact_id = art.get("artifact_id") or art.get("id") or art.get("saved_filename") or "unknown"
+            original_filename = art.get("original_filename") or art.get("original_name") or art.get("saved_filename") or "unknown"
+            saved_filename = art.get("saved_filename") or original_filename
+            saved_path = art.get("saved_path") or art.get("path") or None
+            uploaded_by = art.get("uploaded_by") or art.get("uploader") or None
+            uploaded_at = art.get("uploaded_at") or art.get("uploadedAt") or None
+            size_bytes = art.get("size_bytes") if art.get("size_bytes") is not None else art.get("size") or art.get("size_bytes") or None
+
+            # analysis may be JSON string from DB; parse if necessary
+            analysis = art.get("analysis")
+            if isinstance(analysis, str):
+                try:
+                    analysis = json.loads(analysis)
+                except Exception:
+                    # keep raw string if it cannot be parsed
+                    analysis = {"raw": analysis}
+            if analysis is None:
+                analysis = art.get("heuristics") or art.get("analysis") or {}
+
+            # ensure final_score is available under a known key for template
+            final_score = None
+            if isinstance(analysis, dict):
+                final_score = analysis.get("final_score") or analysis.get("suspicion_score") or analysis.get("finalScore")
+
+            artifacts.append({
+                "artifact_id": artifact_id,
+                "original_filename": original_filename,
+                "saved_filename": saved_filename,
+                "saved_path": saved_path,
+                "uploaded_by": uploaded_by,
+                "uploaded_at": uploaded_at,
+                "size_bytes": size_bytes,
+                "analysis": analysis,
+                "final_score": final_score
+            })
+        except Exception:
+            logger.exception("Failed to normalize artifact record for report: %r", a)
+            # push a minimal fallback object so template stays stable
+            artifacts.append({
+                "artifact_id": getattr(a, "artifact_id", "unknown") if hasattr(a, "artifact_id") else "unknown",
+                "original_filename": "unknown",
+                "saved_filename": None,
+                "saved_path": None,
+                "uploaded_by": None,
+                "uploaded_at": None,
+                "size_bytes": None,
+                "analysis": {},
+                "final_score": None
+            })
+
+        # --- additional context needed by report.html (PDF/ZIP buttons, file presence) ---
+    # data/<case_id> files used by timeline/report generation
+    processes_path = os.path.join("data", case_id, "processes.csv")
+    events_path = os.path.join("data", case_id, "events.json")
+    processes_exists = os.path.exists(processes_path)
+    events_exists = os.path.exists(events_path)
+
+    # human-friendly generated timestamp (iso string)
+    try:
+        generated_at = iso_time_now()
+    except Exception:
+        generated_at = datetime.utcnow().isoformat() + "Z"
+
+    # Try to build proper URLs for PDF / ZIP. If the reporting blueprint isn't present,
+    # fall back to '#' so the template won't break (you can change the names to match your blueprint).
+    try:
+        # common case: reporting blueprint registered as 'reporting' with endpoints report_pdf, report_bundle
+        pdf_url = url_for("reporting.report_pdf", case_id=case_id)
+        bundle_url = url_for("reporting.report_bundle", case_id=case_id)
+    except Exception:
+        # fallback: try other likely names, then final fallback '#'
+        try:
+            pdf_url = url_for("report_pdf", case_id=case_id)
+        except Exception:
+            pdf_url = "#"
+        try:
+            bundle_url = url_for("report_bundle", case_id=case_id)
+        except Exception:
+            bundle_url = "#"
+
+    # Render template with the extra context the template expects
+    return render_template(
+        "report.html",
+        case_id=case_id,
+        case_info=case_info,
+        artifacts=artifacts,
+        generated_at=generated_at,
+        processes_path=processes_path,
+        events_path=events_path,
+        processes_exists=processes_exists,
+        events_exists=events_exists,
+        pdf_url=pdf_url,
+        bundle_url=bundle_url,
+    )
+
+
+
+
+# ---------- render & serve PDF on-demand (regenerates from template) ----------
+# Paste this block right after your existing `report()` view in app.py
+
+from flask import make_response
+from jinja2 import TemplateError
+
+def _render_report_html(case_id):
+    """
+    Helper: reuse the same logic you use in /report to produce the template context
+    and render the HTML string for the PDF. This mirrors your report() function's
+    normalization so the PDF matches the page.
+    """
+    case_id_local = case_id
+
+    # Same manifest/db logic used in your report() view
+    case = Case.query.filter_by(case_id=case_id_local).first()
+    artifacts_raw = []
+    case_info = {"case_id": case_id_local, "created_at": None, "artifact_count": 0}
+    try:
+        if case:
+            rows = Artifact.query.filter_by(case_id=case_id_local).order_by(Artifact.uploaded_at.desc()).all()
+            for r in rows:
+                try:
+                    d = r.to_dict() if hasattr(r, "to_dict") else {
+                        "artifact_id": getattr(r, "artifact_id", None),
+                        "original_filename": getattr(r, "original_filename", None),
+                        "saved_filename": getattr(r, "saved_filename", None),
+                        "saved_path": getattr(r, "saved_path", None),
+                        "uploaded_by": getattr(r, "uploaded_by", None),
+                        "uploaded_at": getattr(r, "uploaded_at").isoformat() + "Z" if getattr(r, "uploaded_at", None) else None,
+                        "size_bytes": getattr(r, "size_bytes", None),
+                        "analysis": getattr(r, "analysis", None)
+                    }
+                except Exception:
+                    d = {
+                        "artifact_id": getattr(r, "artifact_id", None),
+                        "original_filename": getattr(r, "original_filename", None),
+                        "saved_filename": getattr(r, "saved_filename", None),
+                        "saved_path": getattr(r, "saved_path", None),
+                        "uploaded_by": getattr(r, "uploaded_by", None),
+                        "uploaded_at": getattr(r, "uploaded_at").isoformat() + "Z" if getattr(r, "uploaded_at", None) else None,
+                        "size_bytes": getattr(r, "size_bytes", None),
+                        "analysis": getattr(r, "analysis", None)
+                    }
+                artifacts_raw.append(d)
+            case_info = case.to_dict() if hasattr(case, "to_dict") else {"case_id": case_id_local, "created_at": None, "artifact_count": len(artifacts_raw)}
+        else:
+            manifest = load_manifest(case_id_local)
+            artifacts_raw = manifest.get("artifacts", []) or []
+            case_info = {"case_id": case_id_local, "created_at": manifest.get("created_at"), "artifact_count": len(artifacts_raw)}
+    except Exception:
+        manifest = load_manifest(case_id_local)
+        artifacts_raw = manifest.get("artifacts", []) or []
+        case_info = {"case_id": case_id_local, "created_at": manifest.get("created_at"), "artifact_count": len(artifacts_raw)}
+
+    # Normalize artifacts (same normalization as report())
+    artifacts = []
+    for a in artifacts_raw:
+        try:
+            art = dict(a) if isinstance(a, dict) else {}
+            artifact_id = art.get("artifact_id") or art.get("id") or art.get("saved_filename") or "unknown"
+            original_filename = art.get("original_filename") or art.get("original_name") or art.get("saved_filename") or "unknown"
+            saved_filename = art.get("saved_filename") or original_filename
+            saved_path = art.get("saved_path") or art.get("path") or None
+            uploaded_by = art.get("uploaded_by") or art.get("uploader") or None
+            uploaded_at = art.get("uploaded_at") or art.get("uploadedAt") or None
+            size_bytes = art.get("size_bytes") if art.get("size_bytes") is not None else art.get("size") or art.get("size_bytes") or None
+
+            analysis = art.get("analysis")
+            if isinstance(analysis, str):
+                try:
+                    analysis = json.loads(analysis)
+                except Exception:
+                    analysis = {"raw": analysis}
+            if analysis is None:
+                analysis = art.get("heuristics") or art.get("analysis") or {}
+
+            final_score = None
+            if isinstance(analysis, dict):
+                final_score = analysis.get("final_score") or analysis.get("suspicion_score") or analysis.get("finalScore")
+
+            artifacts.append({
+                "artifact_id": artifact_id,
+                "original_filename": original_filename,
+                "saved_filename": saved_filename,
+                "saved_path": saved_path,
+                "uploaded_by": uploaded_by,
+                "uploaded_at": uploaded_at,
+                "size_bytes": size_bytes,
+                "analysis": analysis,
+                "final_score": final_score,
+                # for template compatibility
+                "meta": art,
+                "meta_name": artifact_id
+            })
+        except Exception:
+            artifacts.append({
+                "artifact_id": getattr(a, "artifact_id", "unknown") if hasattr(a, "artifact_id") else "unknown",
+                "original_filename": "unknown",
+                "saved_filename": None,
+                "saved_path": None,
+                "uploaded_by": None,
+                "uploaded_at": None,
+                "size_bytes": None,
+                "analysis": {},
+                "final_score": None,
+                "meta": a,
+                "meta_name": "unknown"
+            })
+
+    processes_path = os.path.join("data", case_id_local, "processes.csv")
+    events_path = os.path.join("data", case_id_local, "events.json")
+    processes_exists = os.path.exists(processes_path)
+    events_exists = os.path.exists(events_path)
+
+    try:
+        generated_at = iso_time_now()
+    except Exception:
+        generated_at = datetime.utcnow().isoformat() + "Z"
+
+    # Render the template to HTML string
+    try:
+        html = render_template(
+            "report.html",
+            case_id=case_id_local,
+            case_info=case_info,
+            artifacts=artifacts,
+            generated_at=generated_at,
+            processes_path=processes_path,
+            events_path=events_path,
+            processes_exists=processes_exists,
+            events_exists=events_exists,
+            pdf_url="#",    # when generating PDF we don't need these links
+            bundle_url="#"
+        )
+        return html
+    except TemplateError:
+        logger.exception("Failed to render report template for PDF generation")
+        raise
+
+@app.route("/report/pdf/<case_id>")
+def report_pdf(case_id):
+    """
+    Render the report template and attempt to convert to PDF on-the-fly.
+    Tries WeasyPrint first, then pdfkit/wkhtmltopdf. Falls back to serving
+    an existing on-disk PDF if conversion fails.
+    """
+    html = _render_report_html(case_id)
+
+    # 2) Try pdfkit (wkhtmltopdf)
+    try:
+        import pdfkit
+        # If wkhtmltopdf is not in PATH, optionally user can set PDFKIT_WKHTMLTOPDF env var.
+        wkhtml_exe = os.environ.get("PDFKIT_WKHTMLTOPDF")  # e.g. "C:\\Program Files\\wkhtmltopdf\\bin\\wkhtmltopdf.exe"
+        if wkhtml_exe:
+            config = pdfkit.configuration(wkhtmltopdf=wkhtml_exe)
+            pdf_bytes = pdfkit.from_string(html, False, options={"enable-local-file-access": None}, configuration=config)
+        else:
+            pdf_bytes = pdfkit.from_string(html, False, options={"enable-local-file-access": None})
+        resp = make_response(pdf_bytes)
+        resp.headers.set("Content-Type", "application/pdf")
+        resp.headers.set("Content-Disposition", f"attachment; filename={case_id}_report.pdf")
+        logger.info("PDF generated with pdfkit/wkhtmltopdf for %s", case_id)
+        return resp
+    except Exception as e:
+        logger.exception("pdfkit/wkhtmltopdf generation failed or not available: %s", e)
+
+    # 3) Fallback: serve pre-generated file on disk if exists (check many likely locations)
+    # Build candidate list robustly (handles Windows/Unix path separators)
+    candidates = []
+    # data/<case_id>/report.pdf
+    candidates.append(os.path.normpath(os.path.join(DATA_DIR, case_id, "report.pdf")))
+    # data/<case_id>_report.pdf
+    candidates.append(os.path.normpath(os.path.join(DATA_DIR, f"{case_id}_report.pdf")))
+    # PROJECT_ROOT/<case_id>_report.pdf
+    candidates.append(os.path.normpath(os.path.join(PROJECT_ROOT, f"{case_id}_report.pdf")))
+    # /mnt/data/<case_id>_report.pdf (useful in cloud/dev containers)
+    try:
+        candidates.append(os.path.normpath(os.path.join("/mnt/data", f"{case_id}_report.pdf")))
+    except Exception:
+        pass
+    # also check /tmp variants (some systems)
+    try:
+        candidates.append(os.path.normpath(os.path.join("/tmp", f"{case_id}_report.pdf")))
+    except Exception:
+        pass
+
+    checked = []
+    for p in candidates:
+        checked.append(p)
+        if p and os.path.exists(p):
+            logger.info("Serving existing on-disk PDF for %s: %s", case_id, p)
+            # Flask send_file on some versions requires download_name kw only on newer Flask; using send_file fallback
+            return send_file(p, as_attachment=True, download_name=os.path.basename(p) if hasattr(send_file, '__call__') else os.path.basename(p))
+
+    # nothing found — return JSON error (helpful for debugging)
+    logger.error("PDF generation failed and no on-disk report found (checked: %s)", checked)
+    return jsonify({"error": "PDF generation failed and no on-disk report found", "checked": checked}), 500
+
+
+@app.route("/report/bundle/<case_id>")
+def report_bundle(case_id):
+    pdf_candidates = [
+        os.path.join("data", case_id, "report.pdf"),
+        os.path.join("data", f"{case_id}_report.pdf"),
+        os.path.join("/mnt/data", f"{case_id}_report.pdf"),
+    ]
+    pdf_path = next((p for p in pdf_candidates if os.path.exists(p)), None)
+
+    manifest_path = os.path.join("data", case_id, "manifest.json")
+    if not os.path.exists(manifest_path):
+        manifest_path = None
+
+    if not pdf_path and not manifest_path:
+        return jsonify({"error": "no report or manifest found"}), 404
+
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        if pdf_path:
+            zf.write(pdf_path, arcname=os.path.basename(pdf_path))
+        if manifest_path:
+            zf.write(manifest_path, arcname=os.path.basename(manifest_path))
+    mem.seek(0)
+
+    resp = make_response(mem.read())
+    resp.headers.set("Content-Type", "application/zip")
+    resp.headers.set("Content-Disposition", f"attachment; filename={case_id}_report_bundle.zip")
+    return resp
 
 
 @app.route("/heuristics", methods=["GET", "POST"])
@@ -1502,6 +1918,18 @@ def api_recompute_score(case_id, artifact_id):
         except Exception:
             logger.exception("Failed to update manifest for %s/%s", case_id, artifact_id)
 
+        # publish recompute event to timeline (non-blocking)
+        try:
+            utils_events.append_event(case_id, {
+                "type": "recompute_score",
+                "artifact_id": artifact_id,
+                "final_score": meta.get("analysis", {}).get("final_score"),
+                "details": {"ioc_matches_count": len(ioc_matches), "yara_matches_count": len(yara_matches)}
+            })
+        except Exception:
+            logger.exception("Failed to append recompute event for %s/%s", case_id, artifact_id)
+
+
         # 10) return structured result
         return jsonify({
             "status": "ok",
@@ -1633,6 +2061,18 @@ def api_coc_add():
         except Exception:
             logger.exception("Failed to record audit for CoC add %s/%s", case_id, artifact_id)
 
+        # Append CoC timeline event (non-blocking)
+        try:
+            utils_events.append_event(case_id, {
+                "type": "coc_add",
+                "actor": actor,
+                "action": action,
+                "artifact_id": artifact_id,
+                "signature": signature
+            })
+        except Exception:
+            logger.exception("Failed to append CoC timeline event for %s/%s", case_id, artifact_id)
+
         return jsonify({"status": "ok", "id": coc.id, "signature": signature}), 201
 
     except Exception as e:
@@ -1726,6 +2166,19 @@ def api_coc_verify(case_id, artifact_id):
             "on_disk_sha256": on_disk_sha,
             "computed_sha256": computed_sha
         }
+
+        # Publish verification outcome to timeline (non-blocking)
+        try:
+            utils_events.append_event(case_id, {
+                "type": "coc_verify",
+                "artifact_id": artifact_id,
+                "metadata_hmac_ok": ok,
+                "on_disk_sha256": on_disk_sha,
+                "computed_sha256": computed_sha
+            })
+        except Exception:
+            logger.exception("Failed to append CoC verify event for %s/%s", case_id, artifact_id)
+
 
         # Audit results
         if not ok:
