@@ -278,4 +278,3 @@ def generate_case_processes_and_events(extract_root: str, out_processes: str, ou
             pass
 
     return processes_written, events_written
-

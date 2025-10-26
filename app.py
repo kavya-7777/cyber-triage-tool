@@ -4,7 +4,7 @@ import os
 import io, zipfile
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 # --- Heuristics integration imports ---
 from werkzeug.utils import secure_filename
 from modules import utils as mutils
@@ -21,6 +21,22 @@ from modules.utils import (
 import tempfile
 
 from modules.models import ChainOfCustody
+app = Flask(__name__)
+
+
+def ist_time(value, fmt='%Y-%m-%d %H:%M:%S'):
+    """
+    Converts a datetime object to IST and returns formatted string.
+    If value is already a string, returns it as-is.
+    """
+    if isinstance(value, datetime):
+        ist = value + timedelta(hours=5, minutes=30)
+        return ist.strftime(fmt)
+    return value
+
+# Register the filter with Jinja2
+app.jinja_env.filters['ist_time'] = ist_time
+
 
 def _heuristics_stub(path, *args, **kwargs):
     return {"suspicion_score": None, "reasons": [], "component_scores": {}}
@@ -44,8 +60,6 @@ import shutil
 
 # DB
 from modules.db import db
-
-app = Flask(__name__)
 app.config["UPLOAD_FOLDER"] = "evidence"
 # ---------------------------
 # App config: upload limits, allowed extensions & logging
@@ -196,10 +210,9 @@ def add_artifact_to_manifest(case_id, artifact_metadata):
 # -------------------------
 @app.route("/")
 def home():
-    return render_template("upload.html")
+    return render_template("home.html")
 
-
-@app.route("/upload", methods=["POST"])
+@app.route("/upload", methods=["GET", "POST"])
 def upload_file():
     """
     Save file to disk (modules.utils.save_uploaded_file), compute SHA-256,
@@ -213,6 +226,9 @@ def upload_file():
     - generate case-level processes.csv and events.json (via generate_case_processes_and_events)
     - build timeline and return per-file scores + timeline preview
     """
+    if request.method == "GET":
+        return render_template("upload.html")
+
     if "file" not in request.files:
         return jsonify({"error": "No file part in the request"}), 400
 
@@ -1109,6 +1125,7 @@ def upload_file():
         "manifest_summary_count": manifest_count
     })
 
+    return render_template("upload.html")
 
 @app.route("/api/upload_timeline", methods=["POST"])
 def api_upload_timeline():
@@ -1483,16 +1500,32 @@ def report_bundle_redirect(case_id):
 def report_pdf(case_id):
     """
     Render the report template and attempt to convert to PDF on-the-fly.
-    Tries WeasyPrint first, then pdfkit/wkhtmltopdf. Falls back to serving
+    Tries Playwright first, then pdfkit/wkhtmltopdf. Falls back to serving
     an existing on-disk PDF if conversion fails.
     """
     html = _render_report_html(case_id)
 
+    # 1) Try Playwright first
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True, args=["--no-sandbox"] if os.environ.get("CI") else [])
+            page = browser.new_page()
+            page.set_content(html, wait_until="networkidle", timeout=30000)
+            pdf_bytes = page.pdf(format="A4", print_background=True)
+            browser.close()
+        resp = make_response(pdf_bytes)
+        resp.headers.set("Content-Type", "application/pdf")
+        resp.headers.set("Content-Disposition", f"attachment; filename={case_id}_report.pdf")
+        logger.info("PDF generated with Playwright for %s", case_id)
+        return resp
+    except Exception as e:
+        logger.exception("Playwright PDF generation failed or not available: %s", e)
+
     # 2) Try pdfkit (wkhtmltopdf)
     try:
         import pdfkit
-        # If wkhtmltopdf is not in PATH, optionally user can set PDFKIT_WKHTMLTOPDF env var.
-        wkhtml_exe = os.environ.get("PDFKIT_WKHTMLTOPDF")  # e.g. "C:\\Program Files\\wkhtmltopdf\\bin\\wkhtmltopdf.exe"
+        wkhtml_exe = os.environ.get("PDFKIT_WKHTMLTOPDF")  # optional path
         if wkhtml_exe:
             config = pdfkit.configuration(wkhtmltopdf=wkhtml_exe)
             pdf_bytes = pdfkit.from_string(html, False, options={"enable-local-file-access": None}, configuration=config)
@@ -1506,21 +1539,16 @@ def report_pdf(case_id):
     except Exception as e:
         logger.exception("pdfkit/wkhtmltopdf generation failed or not available: %s", e)
 
-    # 3) Fallback: serve pre-generated file on disk if exists (check many likely locations)
-    # Build candidate list robustly (handles Windows/Unix path separators)
-    candidates = []
-    # data/<case_id>/report.pdf
-    candidates.append(os.path.normpath(os.path.join(DATA_DIR, case_id, "report.pdf")))
-    # data/<case_id>_report.pdf
-    candidates.append(os.path.normpath(os.path.join(DATA_DIR, f"{case_id}_report.pdf")))
-    # PROJECT_ROOT/<case_id>_report.pdf
-    candidates.append(os.path.normpath(os.path.join(PROJECT_ROOT, f"{case_id}_report.pdf")))
-    # /mnt/data/<case_id>_report.pdf (useful in cloud/dev containers)
+    # 3) Fallback: serve pre-generated file on disk if exists
+    candidates = [
+        os.path.normpath(os.path.join(DATA_DIR, case_id, "report.pdf")),
+        os.path.normpath(os.path.join(DATA_DIR, f"{case_id}_report.pdf")),
+        os.path.normpath(os.path.join(PROJECT_ROOT, f"{case_id}_report.pdf"))
+    ]
     try:
         candidates.append(os.path.normpath(os.path.join("/mnt/data", f"{case_id}_report.pdf")))
     except Exception:
         pass
-    # also check /tmp variants (some systems)
     try:
         candidates.append(os.path.normpath(os.path.join("/tmp", f"{case_id}_report.pdf")))
     except Exception:
@@ -1531,13 +1559,11 @@ def report_pdf(case_id):
         checked.append(p)
         if p and os.path.exists(p):
             logger.info("Serving existing on-disk PDF for %s: %s", case_id, p)
-            # Flask send_file on some versions requires download_name kw only on newer Flask; using send_file fallback
             return send_file(p, as_attachment=True, download_name=os.path.basename(p) if hasattr(send_file, '__call__') else os.path.basename(p))
 
-    # nothing found — return JSON error (helpful for debugging)
+    # nothing found — return JSON error
     logger.error("PDF generation failed and no on-disk report found (checked: %s)", checked)
     return jsonify({"error": "PDF generation failed and no on-disk report found", "checked": checked}), 500
-
 
 @app.route("/report/bundle/<case_id>")
 def report_bundle(case_id):

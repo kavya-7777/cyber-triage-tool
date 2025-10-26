@@ -49,3 +49,18 @@ sandbox_*.py
 reports/
 output/
 backups/
+!templates/*.html
+
+# --- Allow frontend files ---
+!templates/
+!templates/*.html
+!static/
+!static/**/*.js
+!static/**/*.css
+!static/**/*.json
+
+
+# --- Allow frontend files ---
+!templates/**
+!static/**
+
