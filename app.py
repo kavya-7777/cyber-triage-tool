@@ -18,6 +18,7 @@ from modules.utils import (
     atomic_write_json
 )
 
+
 import tempfile
 
 from modules.models import ChainOfCustody
@@ -376,7 +377,7 @@ def upload_file():
                 return jsonify({"error": "zip extraction helper not available on server"}), 500
 
             try:
-                extracted_paths = safe_extract_zip(saved_path, unpack_dir)
+                extracted_paths = safe_extract_zip(saved_path, unpack_dir, case_id)
             except Exception as e:
                 logger.exception("Zip extraction failed for %s: %s", saved_path, e)
                 return jsonify({"error": "zip extraction failed", "exc": str(e)}), 500
@@ -387,6 +388,43 @@ def upload_file():
                 from modules.ioc import normalize_extracted_metadata
                 normalized_count = normalize_extracted_metadata(case_id)
                 logger.info("Normalized %d extracted metadata files for case %s", normalized_count, case_id)
+
+                # --- Run full analysis pipeline for each extracted file ---
+                from modules.analysis import analyze_artifact
+                from modules.utils import add_coc_entry
+
+                per_file_results = []
+                for file_path in extracted_paths:
+                    try:
+                        filename = os.path.basename(file_path)
+                        artifact_id = f"extracted__{os.path.splitext(filename)[0]}"
+
+                        # Run the standard analysis (same as single file uploads)
+                        analysis_result = analyze_artifact(file_path, case_id=case_id, artifact_id=artifact_id)
+
+                        # Save key info for response
+                        per_file_results.append({
+                            "artifact_id": artifact_id,
+                            "filename": filename,
+                            "final_score": analysis_result.get("final_score", 0),
+                            "sha256": analysis_result.get("latest_sha256"),
+                            "ioc_matches": analysis_result.get("ioc_matches", []),
+                            "yara_matches": analysis_result.get("yara_matches", [])
+                        })
+
+                        # Add Chain of Custody entry for analysis
+                        add_coc_entry(
+                            db, case_id, artifact_id,
+                            actor="system:analyzer",
+                            action="analyzed",
+                            location="server",
+                            details={"final_score": analysis_result.get("final_score", 0)}
+                        )
+                        logger.info("Analyzed extracted file %s (%s)", artifact_id, filename)
+
+                    except Exception:
+                        logger.exception("Full analysis failed for extracted file %s", file_path)
+
             except Exception:
                 # don't abort processing if normalization fails; log and continue
                 logger.exception("Failed to normalize extracted metadata for case %s", case_id)
@@ -405,7 +443,7 @@ def upload_file():
                     except Exception:
                         logger.exception("Heuristics failed for %s", path)
 
-                                        # Try to reuse any metadata produced by the extractor for this extracted file.
+                    # Try to reuse any metadata produced by the extractor for this extracted file.
                     # If none found, fall back to creating a new extracted__<uuid> metadata object.
                     artifact_id = None
                     artifact_meta = None
@@ -627,6 +665,15 @@ def upload_file():
                     except Exception:
                         logger.exception("update_artifact_hash failed for %s", path)
 
+                    # --- Run heuristics and compute final score ---
+                    try:
+                        heur_report = analyze_file(path)
+                        heuristic_score = heur_report.get("suspicion_score", 0)
+                    except Exception as e:
+                        logger.exception("Heuristic analysis failed for %s", path)
+                        heur_report, heuristic_score = {}, 0
+
+                    # Run IOC and YARA as before
                     ioc_matches = []
                     try:
                         ioc_res = check_iocs_for_artifact(case_id, artifact_meta["artifact_id"])
@@ -643,28 +690,37 @@ def upload_file():
                     except Exception:
                         logger.exception("YARA scan failed for %s", path)
 
-                    # attach analysis & compute final score
-                    artifact_meta["sha256"] = sha
+                    # Compute combined score using heuristics suspicion_score
+                    try:
+                        from modules.scoring import compute_final_score
+                        final = compute_final_score({
+                            "ioc_matches": ioc_matches,
+                            "yara_matches": yara_matches,
+                            "heuristics": {"suspicion_score": heuristic_score}
+                        })
+                    except Exception:
+                        logger.exception("compute_final_score failed for %s", path)
+                        final = {"final_score": heuristic_score, "breakdown": {}, "reasons": []}
+
+                    artifact_meta["analysis"] = {
+                        "final_score": final.get("final_score", heuristic_score),
+                        "breakdown": final.get("breakdown", {}),
+                        "reasons": final.get("reasons", [])
+                    }
                     artifact_meta["heuristics"] = heur_report
                     artifact_meta["ioc_matches"] = ioc_matches
                     artifact_meta["yara_matches"] = yara_matches
 
-                    try:
-                        from modules.scoring import compute_final_score
-                        final = compute_final_score({
-                            "ioc": ioc_matches,
-                            "yara": yara_matches,
-                            "heuristics": heur_report
-                        })
-                    except Exception:
-                        logger.exception("compute_final_score failed for %s", path)
-                        final = {"final_score": None, "breakdown": {}, "reasons": []}
-
-                    artifact_meta["analysis"] = {
-                        "final_score": final.get("final_score"),
-                        "breakdown": final.get("breakdown"),
-                        "reasons": final.get("reasons")
-                    }
+                    # Add result for response
+                    per_file_results.append({
+                        "artifact_id": artifact_meta["artifact_id"],
+                        "filename": artifact_meta.get("original_filename", os.path.basename(path)),
+                        "sha256": sha,
+                        "final_score": artifact_meta["analysis"]["final_score"],
+                        "ioc_matches": ioc_matches,
+                        "yara_matches": yara_matches,
+                        "heuristic_score": heuristic_score
+                    })
 
                     # persist artifact JSON next to file (signed & atomic, merge safely)
                     try:
@@ -707,6 +763,91 @@ def upload_file():
                         "ioc_matches": ioc_matches,
                         "yara_matches": yara_matches
                     })
+
+                    # --- NEW PATCH: add Chain of Custody and upload event for extracted files ---
+                    try:
+                        from modules.utils import add_coc_entry
+                        add_coc_entry(
+                            db,
+                            case_id,
+                            artifact_meta["artifact_id"],
+                            actor=artifact_meta.get("uploaded_by", "uploader"),
+                            action="uploaded",
+                            location="zip_extraction",
+                            details={"sha256": sha}
+                        )
+                        logger.info("CoC entry added for extracted artifact %s", artifact_meta["artifact_id"])
+                    except Exception:
+                        logger.exception("Failed to create CoC entry for extracted artifact %s", artifact_meta.get("artifact_id"))
+
+                    try:
+                        utils_events.append_event(case_id, {
+                            "type": "artifact_uploaded",
+                            "artifact": {
+                                "artifact_id": artifact_meta["artifact_id"],
+                                "original_filename": artifact_meta.get("original_filename"),
+                                "saved_filename": artifact_meta.get("saved_filename"),
+                                "saved_path": artifact_meta.get("saved_path"),
+                                "size_bytes": artifact_meta.get("size_bytes"),
+                                "uploaded_by": artifact_meta.get("uploaded_by"),
+                                "uploaded_at": artifact_meta.get("uploaded_at"),
+                                "sha256": sha,
+                                "analysis": artifact_meta.get("analysis"),
+                            },
+                            "note": "uploaded via ZIP ingestion"
+                        })
+                        logger.info("Upload event recorded for extracted artifact %s", artifact_meta["artifact_id"])
+
+                    except Exception:
+                        logger.exception("Failed to append upload event for extracted artifact %s", artifact_meta.get("artifact_id"))
+
+                        # --- NEW: Compute score for extracted artifacts ---
+                        from modules import scoring, ioc, yara_rules, heuristics
+
+                        try:
+                            meta_path = os.path.join(artifacts_dir, f"{artifact_id}.json")
+                            if os.path.exists(meta_path):
+                                # Analyze the extracted file just like a standalone upload
+                                try:
+                                    ioc_matches = ioc.scan_file_for_iocs(path)
+                                    yara_matches = yara_rules.scan_file_with_yara(path)
+                                    heur_report = heuristics.analyze_file(path)
+                                except Exception:
+                                    logger.exception("Analysis failed for extracted file %s", path)
+                                    ioc_matches, yara_matches, heur_report = [], [], {}
+
+                                try:
+                                    with open(meta_path, "r+", encoding="utf-8") as f:
+                                        meta = json.load(f)
+
+                                        # Build full analysis blob and compute score
+                                        analysis_blob = {
+                                            "ioc_matches": ioc_matches,
+                                            "yara_matches": yara_matches,
+                                            "heuristics": heur_report
+                                        }
+
+                                        score_info = scoring.compute_final_score(analysis_blob)
+                                        meta["analysis"] = score_info
+                                        meta["final_score"] = score_info.get("final_score", 0)
+
+                                        f.seek(0)
+                                        json.dump(meta, f, indent=2)
+                                        f.truncate()
+
+                                    logger.info(
+                                        "Extracted artifact %s scored: %d (ioc=%d yara=%d heur=%s)",
+                                        artifact_id,
+                                        meta["final_score"],
+                                        len(ioc_matches),
+                                        len(yara_matches),
+                                        "yes" if heur_report else "no"
+                                    )
+                                except Exception:
+                                    logger.exception("Failed writing score metadata for %s", artifact_id)
+                        except Exception:
+                            logger.exception("Failed to compute score for extracted artifact %s", artifact_id)
+                        # --- END PATCH ---
 
                     # --- publish a per-file event into data/<case_id>/events.json (non-destructive) ---
                     try:
@@ -793,8 +934,10 @@ def upload_file():
                 "files_processed": len(per_file_results),
                 "per_file": per_file_results,
                 "timeline_count": len(timeline),
-                "timeline_preview": timeline[:10]
+                "timeline_preview": timeline[:10],
+                "message": "ZIP contents extracted and analyzed successfully"
             })
+
 
     except Exception:
         # If anything unexpected happens in ZIP branch detection/processing, log and continue to single-file flow
@@ -1164,6 +1307,13 @@ def dashboard():
         artifacts = manifest.get("artifacts", [])
         artifact_count = len(artifacts)
         case_info = {"case_id": case_id, "created_at": None, "artifact_count": artifact_count}
+        
+    for art in artifacts:
+        # Attach parsed or serialized analysis data for Why? modal
+        if isinstance(art.get("analysis"), dict):
+            art["data_analysis"] = json.dumps(art["analysis"])
+        else:
+            art["data_analysis"] = "{}"
 
     # Render template with artifacts read from DB (or fallback)
     return render_template(
@@ -2242,32 +2392,37 @@ def api_coc_get(case_id, artifact_id):
         return jsonify({"error": "failed to fetch"}), 500
 
 
+from glob import glob
+
 @app.route("/api/coc/verify/<case_id>/<artifact_id>", methods=["GET"])
 def api_coc_verify(case_id, artifact_id):
+    """Verify artifact metadata integrity (with uploads fallback)."""
     try:
         _, artifacts_dir = ensure_case_dirs(case_id)
+
+        # Normal expected location
         meta_path = os.path.join(artifacts_dir, f"{artifact_id}.json")
+
+        # 🔍 If not found, search also in uploads subfolders (for extracted ZIPs)
         if not os.path.exists(meta_path):
-            return jsonify({"status": "error", "error": "metadata missing"}), 404
+            alt = glob(os.path.join(artifacts_dir, "uploads", "**", f"{artifact_id}.json"), recursive=True)
+            if alt:
+                meta_path = alt[0]
+            else:
+                return jsonify({"status": "error", "error": "metadata missing"}), 404
 
         ok, details = verify_signed_metadata(meta_path)
         with open(meta_path, "r", encoding="utf-8") as fh:
             meta = json.load(fh)
 
-        # figure out on-disk reference SHA
-        on_disk_sha = None
-        if meta.get("analysis", {}):
-            on_disk_sha = meta.get("analysis", {}).get("latest_sha256") or meta.get("analysis", {}).get("sha256")
-        if not on_disk_sha:
-            on_disk_sha = meta.get("sha256")
-
+        # Determine SHA info
+        on_disk_sha = meta.get("analysis", {}).get("latest_sha256") or meta.get("sha256")
         saved_path = meta.get("saved_path")
         computed_sha = None
         if saved_path and os.path.exists(saved_path):
-            try:
-                computed_sha, _ = compute_sha256(saved_path)
-            except Exception:
-                logger.exception("Failed to compute sha for %s/%s", case_id, artifact_id)
+            import hashlib
+            with open(saved_path, "rb") as fh:
+                computed_sha = hashlib.sha256(fh.read()).hexdigest()
 
         result = {
             "metadata_hmac_ok": ok,
@@ -2276,36 +2431,22 @@ def api_coc_verify(case_id, artifact_id):
             "computed_sha256": computed_sha
         }
 
-        # Publish verification outcome to timeline (non-blocking)
-        try:
-            utils_events.append_event(case_id, {
-                "type": "coc_verify",
-                "artifact_id": artifact_id,
-                "metadata_hmac_ok": ok,
-                "on_disk_sha256": on_disk_sha,
-                "computed_sha256": computed_sha
-            })
-        except Exception:
-            logger.exception("Failed to append CoC verify event for %s/%s", case_id, artifact_id)
-
-
-        # Audit results
+        # Record audit
         if not ok:
             record_audit(db, case_id, artifact_id, "system:verifier", "metadata_hmac_mismatch", details)
-        if on_disk_sha and computed_sha and on_disk_sha != computed_sha:
+        elif on_disk_sha and computed_sha and on_disk_sha != computed_sha:
             record_audit(db, case_id, artifact_id, "system:verifier", "hash_mismatch", {"expected": on_disk_sha, "observed": computed_sha})
-        elif computed_sha is not None:
+        else:
             record_audit(db, case_id, artifact_id, "system:verifier", "hash_ok", {"sha256": computed_sha})
 
-        # --- NEW: add Chain-of-Custody entry reflecting verification result ---
+        # Add CoC entry for verification
         try:
             from modules.utils import add_coc_entry
             coc_action = "metadata_verified" if ok else "metadata_tampered"
             coc_details = details if isinstance(details, dict) else {"details": details}
             add_coc_entry(db, case_id, artifact_id, actor="system:verifier", action=coc_action, location="server", details=coc_details)
-            
         except Exception:
-            logger.exception("Failed to create CoC entry after verification for %s/%s", case_id, artifact_id)
+            logger.exception("Failed to add CoC entry after verification for %s/%s", case_id, artifact_id)
 
         return jsonify(result)
 

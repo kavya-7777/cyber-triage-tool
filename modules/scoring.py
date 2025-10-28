@@ -442,6 +442,21 @@ def compute_final_score(analysis_blob: Optional[Dict[str, Any]],
     - demo_mode: if True, produce deterministic demo score based on demo_id; still returns breakdown & reasons
     - demo_id: optional stable id used for deterministic demo seeding (artifact_id or sha)
     """
+    logger.info(f"[DEBUG scoring] Incoming analysis_blob keys: {list(analysis_blob.keys()) if isinstance(analysis_blob, dict) else type(analysis_blob)}")
+
+    # Normalize blob early to avoid skipping nested analysis
+    normalized = _normalize_analysis_blob(analysis_blob)
+    ioc_matches = normalized.get("ioc_matches", [])
+    yara_matches = normalized.get("yara_matches", [])
+    heur = normalized.get("heuristics", {})
+
+    logger.info(f"[DEBUG scoring] Normalized keys: iocs={len(ioc_matches)}, yara={len(yara_matches)}, heuristics={'yes' if heur else 'no'}")
+
+    # Early return only if *truly empty*
+    if not ioc_matches and not yara_matches and not heur:
+        logger.info("[DEBUG scoring] No IOC/YARA/heuristics detected — returning 0")
+        return {"final_score": 0, "reasons": ["No IOC, YARA, or heuristics data available"]}
+        
     # Load/normalize weights (arg -> disk -> default)
     def _load_weights(pth):
         try:

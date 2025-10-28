@@ -355,7 +355,7 @@ def add_coc_entry(db, case_id, artifact_id, actor="system", action="access", fro
             to_entity=to_entity,
             reason=reason,
             location=location,
-            details=json.dumps(details) if details else None,
+            details=json.dumps(details, default=str) if details else None,
             signature=sig
         )
         db.session.add(coc)
@@ -386,4 +386,4 @@ def add_coc_entry(db, case_id, artifact_id, actor="system", action="access", fro
             db.session.rollback()
         except Exception:
             pass
-        raise
+        return None, None

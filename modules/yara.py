@@ -81,7 +81,13 @@ def compile_rules(rules_path="data/yara_rules.yar"):
 
 
 def _find_saved_file(case_id, artifact_id):
+    """
+    Locate the actual file corresponding to this artifact ID.
+    Supports files extracted from ZIP archives (uploads/zip_*).
+    """
     _, artifacts_dir = ensure_case_dirs(case_id)
+
+    # Try metadata first
     meta_path = os.path.join(artifacts_dir, f"{artifact_id}.json")
     saved_path = None
     if os.path.exists(meta_path):
@@ -89,17 +95,32 @@ def _find_saved_file(case_id, artifact_id):
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
             saved_path = meta.get("saved_path")
+            if saved_path and os.path.exists(saved_path):
+                return saved_path
         except Exception:
-            logger.exception("Failed reading artifact metadata JSON %s", meta_path)
-    if saved_path and os.path.exists(saved_path):
-        return saved_path
-    # fallback: find file by prefix <artifact_id>__
+            logger.debug("Could not read saved_path from %s", meta_path)
+
+    # Try direct prefix match in artifacts/
     try:
-        for fname in os.listdir(artifacts_dir):
-            if fname.startswith(artifact_id + "__"):
-                return os.path.join(artifacts_dir, fname)
+        for fn in os.listdir(artifacts_dir):
+            if fn.startswith(artifact_id + "__") or fn.startswith(artifact_id):
+                candidate = os.path.join(artifacts_dir, fn)
+                if os.path.exists(candidate) and not candidate.lower().endswith(".json"):
+                    return candidate
     except Exception:
-        logger.exception("Failed listing artifacts dir %s", artifacts_dir)
+        pass
+
+    # ✅ New: walk uploads/zip_* subfolders for matching file
+    uploads_dir = os.path.join(artifacts_dir, "uploads")
+    if os.path.isdir(uploads_dir):
+        for root, _, files in os.walk(uploads_dir):
+            for fn in files:
+                if fn.startswith(artifact_id) or artifact_id in fn:
+                    candidate = os.path.join(root, fn)
+                    if os.path.exists(candidate):
+                        logger.info(f"Found ZIP-extracted artifact for {artifact_id}: {candidate}")
+                        return candidate
+
     return None
 
 
@@ -250,3 +271,17 @@ def scan_artifact(case_id, artifact_id, rules_path="data/yara_rules.yar"):
         logger.exception("DB lookup failed while updating yara matches for %s/%s", artifact_id, case_id)
 
     return result
+
+def scan_file_with_yara(file_path):
+    """
+    Simple wrapper to scan a standalone file (used by analysis.py)
+    """
+    try:
+        compiled = compile_rules()
+        if not compiled:
+            return []
+        results = compiled.match(filepath=file_path)
+        return [m.rule for m in results]
+    except Exception as e:
+        logger.warning("YARA scan failed for %s: %s", file_path, e)
+        return []

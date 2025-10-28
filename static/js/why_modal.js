@@ -208,7 +208,28 @@
     if(!scoreEl || !breakdownEl || !detailsEl || !reasonsEl) return;
 
     // normalize fields and fallback locations
-    const finalScore = payload.final_score || payload.final || payload.finalScore || (payload.analysis && (payload.analysis.final_score || payload.analysis.suspicion_score)) || 0;
+    const finalScore =
+      payload.final_score ||
+      payload.suspicion_score ||
+      (payload.analysis && (payload.analysis.final_score || payload.analysis.suspicion_score)) ||
+      0;
+    // unify nested structures (if backend nested analysis inside)
+    if (payload.analysis && !payload.breakdown && payload.analysis.breakdown) {
+      payload.breakdown = payload.analysis.breakdown;
+    }
+    if (payload.analysis && !payload.ioc_matches && payload.analysis.ioc_matches) {
+      payload.ioc_matches = payload.analysis.ioc_matches;
+    }
+    if (payload.analysis && !payload.yara_matches && payload.analysis.yara_matches) {
+      payload.yara_matches = payload.analysis.yara_matches;
+    }
+    if (payload.analysis && !payload.heuristics && payload.analysis.heuristics) {
+      payload.heuristics = payload.analysis.heuristics;
+    }
+    if (payload.analysis && !payload.reasons && payload.analysis.reasons) {
+      payload.reasons = payload.analysis.reasons;
+    }
+
     const artifact_id = payload.artifact_id || payload.artifact || (payload.analysis && payload.analysis.artifact_id) || '';
 
     scoreEl.textContent = (typeof finalScore === 'number' ? Math.round(finalScore) : finalScore) + '%';

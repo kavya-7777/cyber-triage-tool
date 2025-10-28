@@ -225,26 +225,39 @@ def load_iocs(ioc_path=IOC_PATH_DEFAULT, force_reload: bool = False) -> Dict[str
 # -----------------------
 def _find_saved_file_if_missing(meta, case_id, artifact_id):
     """
-    Try to locate the saved artifact file. This now walks subdirectories under artifacts
-    (e.g. uploads/zip_*/...) to find a filename that starts with artifact_id.
+    Try to locate the saved artifact file.
+    Handles both normal and ZIP-extracted files under uploads/zip_* subdirs.
     """
     artifacts_dir = os.path.join(BASE_EVIDENCE_DIR, case_id, "artifacts")
     saved_path = meta.get("saved_path")
+
+    # ✅ 1) If metadata already contains valid saved_path, return it
     if saved_path and os.path.exists(saved_path):
         return saved_path
+
     try:
-        # First try simple listing (fast common case)
+        # ✅ 2) Search directly under artifacts/ for prefix match
         if os.path.isdir(artifacts_dir):
             for fn in os.listdir(artifacts_dir):
-                if fn.startswith(artifact_id + "__"):
-                    return os.path.join(artifacts_dir, fn)
-        # Fallback: walk subdirs to find matching filename prefix
-        for root, _, files in os.walk(artifacts_dir):
-            for fn in files:
-                if fn.startswith(artifact_id + "__"):
-                    return os.path.join(root, fn)
+                if fn.startswith(artifact_id + "__") or fn.startswith(artifact_id):
+                    candidate = os.path.join(artifacts_dir, fn)
+                    if os.path.exists(candidate) and not candidate.lower().endswith(".json"):
+                        return candidate
+
+        # ✅ 3) Recursively walk uploads/zip_* subfolders
+        uploads_dir = os.path.join(artifacts_dir, "uploads")
+        if os.path.isdir(uploads_dir):
+            for root, _, files in os.walk(uploads_dir):
+                for fn in files:
+                    # Match artifact prefix or exact filename stored in metadata
+                    if fn.startswith(artifact_id) or fn == os.path.basename(meta.get("original_filename", "")):
+                        candidate = os.path.join(root, fn)
+                        if os.path.exists(candidate):
+                            logger.info(f"Found ZIP-extracted file for {artifact_id}: {candidate}")
+                            return candidate
     except Exception:
         logger.debug("Could not search artifacts dir %s for saved file (non-fatal)", artifacts_dir)
+
     return None
 
 def _search_upload_manifest_for_artifact(case_id: str, artifact_id: str) -> Optional[str]:
@@ -472,8 +485,25 @@ def check_iocs_for_artifact(case_id, artifact_id, ioc_path=IOC_PATH_DEFAULT):
     _, ext = os.path.splitext(filename_lower)
 
     # 1) hash match (fast membership test)
-    if sha and sha.lower() in iocs["hashes"]:
-        matches.append({"type": "hash", "value": sha, "ioc": "hash", "match": True})
+    if isinstance(sha, list) and sha:
+        sha = sha[0]  # take the first hash if list provided
+        
+    if not isinstance(sha, str):
+        sha = str(sha or "")
+
+    if isinstance(sha, (bytes, bytearray)):
+        try:
+            sha = sha.decode("utf-8", errors="ignore")
+        except Exception:
+            sha = None
+
+    if isinstance(sha, str) and sha.lower() in iocs["hashes"]:
+        matches.append({
+            "type": "hash",
+            "value": sha,
+            "ioc": "hash",
+            "match": True
+        })
 
     # 2) filename exact / substring match (use normalized filename)
     if filename_lower:
@@ -506,11 +536,40 @@ def check_iocs_for_artifact(case_id, artifact_id, ioc_path=IOC_PATH_DEFAULT):
             ips_found = []
 
     if ips_found:
-        ip_set = set([ip.lower() for ip in ips_found])
-        ip_iocs = set([ip.lower() for ip in iocs.get("ips", set())])
+        ip_set = set()
+        for ip in ips_found:
+            if isinstance(ip, tuple):
+                ip = ip[0]
+            if isinstance(ip, bytes):
+                try:
+                    ip = ip.decode("utf-8", errors="ignore")
+                except Exception:
+                    continue
+            if isinstance(ip, str):
+                ip_set.add(ip.strip().lower())
+
+        ip_iocs = set()
+        for ip in iocs.get("ips", set()):
+            if isinstance(ip, (list, tuple)):
+                for sub in ip:
+                    if isinstance(sub, str):
+                        ip_iocs.add(sub.strip().lower())
+            elif isinstance(ip, bytes):
+                try:
+                    ip_iocs.add(ip.decode("utf-8", errors="ignore").strip().lower())
+                except Exception:
+                    continue
+            elif isinstance(ip, str):
+                ip_iocs.add(ip.strip().lower())
+
         common_ips = ip_set & ip_iocs
         for ip in common_ips:
-            matches.append({"type": "ip", "value": ip, "ioc": ip, "match": True})
+            matches.append({
+                "type": "ip",
+                "value": ip,
+                "ioc": ip,
+                "match": True
+            })
 
     # 4) domain substring match inside a small snippet of the file (first 8KB)
     domains_found = []
@@ -522,25 +581,50 @@ def check_iocs_for_artifact(case_id, artifact_id, ioc_path=IOC_PATH_DEFAULT):
                 snippet = f.read(8192)
             snippet_text = snippet.decode("utf-8", errors="ignore").lower()
 
-            # domains
+            # --- Domains ---
             for d in iocs.get("domains", set()):
-                if d and d in snippet_text:
-                    domains_found.append(d)
-                    matches.append({"type": "domain", "value": d, "ioc": d, "match": True})
-
-            # urls
-            for u in iocs.get("urls", set()):
-                if not u:
+                val = _value_of(d)
+                if not val:
                     continue
-                if u.lower() in snippet_text:
-                    urls_found.append(u)
-                    matches.append({"type": "url", "value": u, "ioc": u, "match": True})
+                val = str(val).strip().lower()
+                if val and val in snippet_text:
+                    domains_found.append(val)
+                    matches.append({
+                        "type": "domain",
+                        "value": val,
+                        "ioc": val,
+                        "match": True
+                    })
 
-            # yara_strings (simple substring matching for demo)
+            # --- URLs ---
+            for u in iocs.get("urls", set()):
+                val = _value_of(u)
+                if not val:
+                    continue
+                val = str(val).strip().lower()
+                if val and val in snippet_text:
+                    urls_found.append(val)
+                    matches.append({
+                        "type": "url",
+                        "value": val,
+                        "ioc": val,
+                        "match": True
+                    })
+
+            # --- YARA strings ---
             for ys in iocs.get("yara_strings", set()):
-                if ys and ys.lower() in snippet_text:
-                    yara_found.append(ys)
-                    matches.append({"type": "yara_string", "value": ys, "ioc": ys, "match": True})
+                val = _value_of(ys)
+                if not val:
+                    continue
+                val = str(val).strip().lower()
+                if val and val in snippet_text:
+                    yara_found.append(val)
+                    matches.append({
+                        "type": "yara_string",
+                        "value": val,
+                        "ioc": val,
+                        "match": True
+                    })
 
         except Exception:
             logger.exception("Failed domain/url/yara_string substring checks on %s", saved_path)
@@ -607,3 +691,30 @@ def check_iocs_for_artifact(case_id, artifact_id, ioc_path=IOC_PATH_DEFAULT):
         "urls_found": urls_found,
         "yara_strings_found": yara_found
     }
+
+
+def scan_file_for_iocs(file_path):
+    """
+    Lightweight IOC scan used when case_id/artifact_id are not available.
+    Scans file contents for simple IOC patterns (IPs, URLs, emails).
+    """
+    matches = []
+    try:
+        with open(file_path, "rb") as f:
+            data = f.read(8192)
+        text = data.decode("utf-8", errors="ignore").lower()
+
+        ip_re = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+        url_re = re.compile(r"https?://[^\s'\"]+")
+        email_re = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
+
+        for ip in ip_re.findall(text):
+            matches.append({"type": "ip", "value": ip})
+        for url in url_re.findall(text):
+            matches.append({"type": "url", "value": url})
+        for email in email_re.findall(text):
+            matches.append({"type": "email", "value": email})
+    except Exception as e:
+        logger.error("scan_file_for_iocs failed: %s", e)
+
+    return matches

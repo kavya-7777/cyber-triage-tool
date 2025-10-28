@@ -91,7 +91,8 @@
         {# Reveal active weight config from artifacts if present #}
         {% set active_weights = None %}
         {% for art in artifacts %}
-          {% set a_analysis = art.analysis if art.analysis is not none else (art.get('analysis') if a.get is defined else None) %}
+          {% set a_analysis = art.analysis if art.analysis is not none else (art.get('analysis') if art.get is defined else None) %}
+
           {% if not active_weights and a_analysis and a_analysis is mapping and a_analysis.get('weights') %}
             {% set active_weights = a_analysis.get('weights') %}
           {% endif %}

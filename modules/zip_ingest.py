@@ -7,32 +7,70 @@ from typing import List, Dict
 
 logger = logging.getLogger(__name__)
 
-def safe_extract_zip(zip_path: str, dest_dir: str) -> List[str]:
+def safe_extract_zip(zip_path: str, dest_dir: str, case_id: str) -> List[str]:
+    """
+    Securely extract ZIP to dest_dir and copy extracted metadata to evidence/<case_id>/artifacts/.
+    Returns a list of extracted file paths.
+    """
+    import json
+    from modules.hashing import compute_sha256  # ✅ make sure hashing module is imported
+
     extracted = []
     os.makedirs(dest_dir, exist_ok=True)
     base = os.path.abspath(dest_dir)
+
     with zipfile.ZipFile(zip_path, "r") as z:
         for member in z.infolist():
             if member.is_dir():
                 continue
-            # Compute absolute target path, and ensure it's within dest_dir
+
             target_path = os.path.abspath(os.path.join(dest_dir, member.filename))
             if not target_path.startswith(base + os.path.sep):
                 logger.warning("Skipping suspicious zip entry (zip-slip): %s", member.filename)
                 continue
+
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
             with z.open(member) as src, open(target_path, "wb") as out:
                 shutil.copyfileobj(src, out)
+
             extracted.append(target_path)
+
+            # ✅ Create minimal metadata JSON for this extracted file
+            artifact_id = f"extracted__{os.path.splitext(os.path.basename(member.filename))[0]}"
+            meta = {
+                "artifact_id": artifact_id,
+                "case_id": case_id,
+                "original_filename": os.path.basename(member.filename),
+                "saved_path": target_path,
+                "sha256": compute_sha256(target_path),
+                "size_bytes": os.path.getsize(target_path)
+            }
+
+            meta_path = os.path.join(dest_dir, f"{artifact_id}.json")
+            try:
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2)
+                logger.info(f"✅ Created metadata JSON for extracted file: {meta_path}")
+            except Exception as e:
+                logger.error(f"Failed to create metadata for {member.filename}: {e}")
+
+    # ✅ After extraction, move JSON metadata to main artifacts folder
+    artifacts_dir = os.path.join("evidence", case_id, "artifacts")
+    os.makedirs(artifacts_dir, exist_ok=True)
+
+    for extracted_file in extracted:
+        filename = os.path.basename(extracted_file)
+        artifact_id = f"extracted__{os.path.splitext(filename)[0]}"
+        src_meta = os.path.join(dest_dir, f"{artifact_id}.json")
+        dst_meta = os.path.join(artifacts_dir, f"{artifact_id}.json")
+
+        if os.path.exists(src_meta):
+            shutil.copy2(src_meta, dst_meta)
+            logger.info(f"📦 Copied metadata for {artifact_id} → {dst_meta}")
+        else:
+            logger.warning(f"⚠️ No metadata found for {artifact_id} (expected {src_meta})")
+
     return extracted
-
-try:
-    from modules.timeline_utils import is_sysmon_csv, parse_sysmon_csv_to_processes, append_json_events
-except Exception:
-    is_sysmon_csv = None
-    parse_sysmon_csv_to_processes = None
-    append_json_events = None
-
 
 def _append_csv_to_processes(src_csv: str, dst_processes: str) -> int:
     """
