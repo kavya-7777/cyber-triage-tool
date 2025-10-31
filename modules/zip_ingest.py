@@ -167,3 +167,16 @@ def process_extracted_files(case_id: str, extracted_paths: List[str]) -> Dict:
         logger.exception("Failed to ensure timeline files exist for case %s", case_id)
 
     return summary
+
+def deduplicate_artifacts(per_file: List[Dict]) -> List[Dict]:
+    """
+    Remove duplicate artifacts from per_file list based on artifact_id.
+    Keeps the first occurrence.
+    """
+    unique = {}
+    for item in per_file:
+        aid = item.get("artifact_id")
+        if aid and aid not in unique:
+            unique[aid] = item
+    return list(unique.values())
+

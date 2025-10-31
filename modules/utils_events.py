@@ -72,6 +72,10 @@ def append_event(case_id: str, artifacts):
     """
     Append an event for the given artifacts (a dict or list).
     Creates a timestamped backup before writing the new events.json.
+
+    This version adds a small de-duplication guard: if the most recent
+    timeline_preview item has the same type and the same first artifact_id
+    we skip appending to avoid duplicates caused by callers double-writing.
     """
     if isinstance(artifacts, dict):
         artifacts = [artifacts]
@@ -80,11 +84,35 @@ def append_event(case_id: str, artifacts):
     # load existing events structure
     ev = load_events(case_id)
 
-    # create event structure compatible with your timeline expectations
+    # determine event_type from artifacts payloads (same as before)
+    event_type = "event"
+    if isinstance(artifacts, list) and artifacts and isinstance(artifacts[0], dict):
+        event_type = artifacts[0].get("type", "event")
+
+    # --- dedupe guard: if latest preview already has same type & same artifact_id, skip ---
+    try:
+        latest = None
+        if isinstance(ev.get("timeline_preview"), list) and ev["timeline_preview"]:
+            latest = ev["timeline_preview"][0]
+        if latest:
+            latest_type = latest.get("type")
+            latest_details = latest.get("details", {}) or {}
+            latest_artifacts = latest_details.get("artifacts", []) or []
+            # compare first artifact id (this mirrors how callers pass single-artifact events)
+            if latest_type == event_type and latest_artifacts and artifacts and isinstance(artifacts[0], dict):
+                latest_first_id = latest_artifacts[0].get("artifact_id")
+                new_first_id = artifacts[0].get("artifact_id")
+                if latest_first_id and new_first_id and latest_first_id == new_first_id:
+                    # identical event already at front — skip writing duplicate
+                    return
+    except Exception:
+        # if any error in dedupe logic, continue to write normally (fail-safe)
+        pass
+
     event = {
         "id": str(uuid.uuid4()),
         "source": "processor",
-        "type": "event",
+        "type": event_type,
         "timestamp": iso_now(),
         "details": {
             "case_id": case_id,
@@ -97,28 +125,22 @@ def append_event(case_id: str, artifacts):
     if "timeline_preview" not in ev or not isinstance(ev["timeline_preview"], list):
         ev["timeline_preview"] = []
 
-    # insert at front (most-recent-first) to match existing UIs that show preview[0]
+    # Prepend newest event into preview and write full file atomically
     ev["timeline_preview"].insert(0, event)
 
-    # backup then write
+    # Keep preview length bounded (optional; keeps files small)
+    try:
+        MAX_PREVIEW = 200
+        if len(ev["timeline_preview"]) > MAX_PREVIEW:
+            ev["timeline_preview"] = ev["timeline_preview"][:MAX_PREVIEW]
+    except Exception:
+        pass
+
+    # backup current file then write
     try:
         backup_events(case_id)
     except Exception:
-        # don't block on backup failure
+        # non-fatal; continue
         pass
 
     atomic_write(p, ev)
-     # --- NEW: invalidate any cached timeline.json so timeline builder will rebuild ---
-    try:
-        timeline_path = os.path.join(os.path.dirname(p), "timeline.json")
-        if os.path.exists(timeline_path):
-            try:
-                os.remove(timeline_path)
-            except Exception:
-                # best-effort only — don't raise
-                pass
-    except Exception:
-        # defensive; nothing critical if invalidation fails
-        pass
-    
-    return event

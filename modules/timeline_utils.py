@@ -5,73 +5,6 @@ import os
 import uuid
 from typing import Dict
 
-# Basic heuristics to detect Sysmon-ish CSV headers
-SYSMON_HEADERS = {"EventID", "ProcessId", "Image", "CommandLine", "UtcTime", "TimeCreated", "User"}
-
-def is_sysmon_csv(path: str) -> bool:
-    try:
-        with open(path, newline="", encoding="utf-8") as fh:
-            first = fh.read(4096)
-            # quick header sniff
-            if "," in first:
-                header = first.splitlines()[0]
-                cols = {c.strip().strip('"') for c in header.split(",")}
-                return len(cols.intersection(SYSMON_HEADERS)) >= 2
-    except Exception:
-        pass
-    return False
-
-def parse_sysmon_csv_to_processes(src_csv: str, out_csv: str) -> int:
-    """
-    Read a Sysmon-style CSV and write a standardized processes.csv with columns:
-      timestamp,pid,ppid,exe,cmdline,user,event,id
-
-    Returns number of rows written.
-    """
-    fieldmap = {
-        "timestamp": ["UtcTime", "TimeCreated", "timestamp", "Time"],
-        "pid": ["ProcessId", "PID", "pid"],
-        "ppid": ["ParentProcessId", "ParentProcess", "PPID"],
-        "exe": ["Image", "ImageLoaded", "ImagePath", "ImageFileName"],
-        "cmdline": ["CommandLine", "Command", "cmdline"],
-        "user": ["User", "UserName", "UserDomain"]
-    }
-    written = 0
-    with open(src_csv, newline="", encoding="utf-8") as fh:
-        reader = csv.DictReader(fh)
-        # build mapping from desired field -> actual column name
-        col_map = {}
-        for desired, candidates in fieldmap.items():
-            for c in candidates:
-                if c in reader.fieldnames:
-                    col_map[desired] = c
-                    break
-        # safe defaults
-        with open(out_csv, "w", newline="", encoding="utf-8") as outfh:
-            writer = csv.DictWriter(outfh, fieldnames=["timestamp","pid","ppid","exe","cmdline","user","event","id"])
-            writer.writeheader()
-            for row in reader:
-                timestamp = row.get(col_map.get("timestamp",""), "").strip()
-                pid = row.get(col_map.get("pid",""), "").strip()
-                ppid = row.get(col_map.get("ppid",""), "").strip()
-                exe = row.get(col_map.get("exe",""), "").strip()
-                cmdline = row.get(col_map.get("cmdline",""), "").strip()
-                user = row.get(col_map.get("user",""), "").strip()
-                _id = row.get("EventID") or row.get("id") or str(uuid.uuid4())
-                out_row = {
-                    "timestamp": timestamp,
-                    "pid": pid,
-                    "ppid": ppid,
-                    "exe": exe,
-                    "cmdline": cmdline,
-                    "user": user,
-                    "event": "process",  # generic
-                    "id": _id
-                }
-                writer.writerow(out_row)
-                written += 1
-    return written
-
 def append_json_events(src_json: str, out_json: str) -> int:
     """
     Append events from src_json into out_json (a JSON array).
@@ -121,21 +54,6 @@ def append_json_events(src_json: str, out_json: str) -> int:
     return appended
 
 def generate_case_processes_and_events(extract_root: str, out_processes: str, out_events: str, extracted_paths=None):
-    """
-    Aggregate processes.csv and events.json for a case from a list of extracted files.
-
-    Parameters:
-      - extract_root: directory where the zip was extracted (used for fallback scanning)
-      - out_processes: path to write aggregated processes.csv
-      - out_events: path to write aggregated events.json
-      - extracted_paths: optional list of file paths extracted (if None, we will walk extract_root)
-
-    Behavior:
-      - For each CSV that looks like Sysmon, append normalized rows to out_processes.
-      - For each JSON, append events into out_events (uses append_json_events).
-      - For other files, create a simple "file_saved" event that references the path.
-    Returns: tuple (num_process_rows, num_events)
-    """
     import tempfile, shutil, time
 
     if extracted_paths is None:

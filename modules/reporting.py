@@ -48,23 +48,41 @@ def _collect_case_files(case_id: str) -> Dict:
     base["processes_path"] = processes
     base["events_path"] = events
 
+    # --- PATCH START: recursive artifact collector ---
     artifacts = []
+
+    def collect_artifacts_recursive(folder):
+        """Recursively load all artifact JSONs, including extracted ZIP children."""
+        for root, _, files in os.walk(folder):
+            for fn in sorted(files):
+                if not fn.lower().endswith(".json"):
+                    continue
+                meta_path = os.path.join(root, fn)
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as fh:
+                        meta = json.load(fh)
+                except Exception:
+                    meta = {}
+
+                # normalize fields for PDF display
+                meta_name = os.path.relpath(meta_path, folder)
+                filename = meta.get("original_filename") or meta.get("filename") or "unknown"
+                score = meta.get("analysis", {}).get("final_score") or meta.get("final_score")
+                size = meta.get("size") or "-"
+                artifacts.append({
+                    "meta_name": meta_name,
+                    "meta_path": meta_path,
+                    "meta": meta,
+                    "filename": filename,
+                    "score": score,
+                    "size": size
+                })
+
     if os.path.isdir(evidence_artifacts_dir):
-        for entry in sorted(os.listdir(evidence_artifacts_dir)):
-            if not entry.lower().endswith(".json"):
-                continue
-            meta_path = os.path.join(evidence_artifacts_dir, entry)
-            try:
-                with open(meta_path, "r", encoding="utf-8") as fh:
-                    meta = json.load(fh)
-            except Exception:
-                meta = {}
-            artifacts.append({
-                "meta_name": entry,
-                "meta_path": meta_path,
-                "meta": meta
-            })
+        collect_artifacts_recursive(evidence_artifacts_dir)
+
     base["artifacts"] = artifacts
+    # --- PATCH END ---
     return base
 
 def register_reporting_routes(app):

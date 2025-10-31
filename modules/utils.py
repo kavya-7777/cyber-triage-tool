@@ -321,29 +321,71 @@ def normalize_metadata_dict(meta):
         meta["analysis"] = {}
     return meta
 
-# modules/utils.py  (append near other helpers)
-def add_coc_entry(db, case_id, artifact_id, actor="system", action="access", from_entity=None, to_entity=None, reason=None, location=None, details=None):
+def add_coc_entry(db, case_id, artifact_id, actor="system", action="access",
+                  from_entity=None, to_entity=None, reason=None, location=None, details=None):
     """
     Create a ChainOfCustody DB row AND append to on-disk artifact metadata (signed) if present.
     db: SQLAlchemy db instance (modules.db.db)
     Returns the created DB row id and signature string.
     """
+
+    # 🧹 Skip analyzer entries — we only want user/investigator actions
+    if actor == "system:analyzer" and action == "analyzed":
+        logger.debug(f"Skipping CoC analyzer entry for {artifact_id}")
+        return None, None
+
+    meta_path = None
+
+    # 🧩 If actor wasn't passed, try reading investigator name from metadata JSON
     try:
-        from modules.models import ChainOfCustody
-        payload = {
-            "ts": datetime.utcnow().isoformat() + "Z",
-            "case_id": case_id,
-            "artifact_id": artifact_id,
-            "actor": actor,
-            "action": action,
-            "from": from_entity,
-            "to": to_entity,
-            "reason": reason,
-            "location": location,
-            "details": details
-        }
+        from modules.utils import ensure_case_dirs
+        _, artifacts_dir = ensure_case_dirs(case_id)
+        meta_path = os.path.join(artifacts_dir, f"{artifact_id}.json")
+
+        if os.path.exists(meta_path):
+            import json
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            # use the uploader name recorded during upload
+            actor = meta.get("uploaded_by") or actor or "investigator"
+
+    except Exception:
+        logger.warning(f"Could not determine investigator name for {artifact_id}")
+        if not actor:
+            actor = "investigator"
+
+    # ✅ Extract filename from metadata if available
+    filename = "-"
+    try:
+        if meta_path and os.path.exists(meta_path):
+            import json
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            filename = meta.get("original_filename") or meta.get("saved_filename") or "-"
+    except Exception:
+        logger.warning(f"Could not read filename for {artifact_id}")
+
+    # ✅ Build payload (fixed missing comma & invalid timestamp key)
+    from datetime import datetime
+    payload = {
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "case_id": case_id,
+        "artifact_id": artifact_id,
+        "filename": filename,
+        "actor": actor,
+        "action": action,
+        "from": from_entity,
+        "to": to_entity,
+        "reason": reason,
+        "location": location,
+        "details": details
+    }
+
+    try:
         # compute signature
         sig = hmac_for_obj(payload, key=COC_HMAC_KEY)
+
+        from modules.models import ChainOfCustody
 
         # DB insert
         coc = ChainOfCustody(
@@ -380,6 +422,7 @@ def add_coc_entry(db, case_id, artifact_id, actor="system", action="access", fro
             logger.exception("Failed to append CoC to artifact JSON for %s/%s", case_id, artifact_id)
 
         return coc.id, sig
+
     except Exception:
         logger.exception("add_coc_entry failed for %s/%s", case_id, artifact_id)
         try:

@@ -591,3 +591,38 @@ if __name__ == "__main__":
     out = compute_final_score(blob, weights=None, weights_path=weights_path, demo_mode=args.demo,
                               demo_id=(blob.get("artifact_id") if isinstance(blob, dict) else None))
     print(json.dumps(out, indent=2))
+
+# ---- ADD: small wrapper for backward compatibility ----
+def compute_final_score_tuple(analysis_blob: Optional[Dict[str, Any]]) -> Tuple[int, Dict[str, Any]]:
+    """
+    Backwards-compatible wrapper:
+    - Calls the main compute_final_score(...) (which returns a dict)
+    - Returns (final_score_int, enriched_analysis_dict)
+    """
+    # call the main combiner (already defined above)
+    try:
+        out = compute_final_score(analysis_blob)
+    except Exception:
+        # defensive fallback
+        out = {"final_score": 0, "breakdown": {}, "weights": {}, "reasons": [], "components": {}}
+
+    final = int(out.get("final_score", 0))
+    # Ensure analysis_blob is a dict we can update/return
+    if isinstance(analysis_blob, dict):
+        analysis = dict(analysis_blob)  # shallow copy
+    else:
+        analysis = {}
+
+    # Attach canonical fields so frontend / manifest sees them
+    analysis.setdefault("final_score", final)
+    if out.get("breakdown") is not None:
+        analysis["breakdown"] = out.get("breakdown")
+    if out.get("weights") is not None:
+        analysis["weights"] = out.get("weights")
+    if out.get("reasons") is not None:
+        analysis["reasons"] = out.get("reasons")
+    if out.get("components") is not None:
+        analysis["components"] = out.get("components")
+
+    return final, analysis
+# ---- END wrapper ----

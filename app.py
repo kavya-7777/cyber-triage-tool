@@ -111,16 +111,6 @@ with app.app_context():
 # Register reporting blueprint (for PDF + ZIP report downloads)
 register_reporting_routes(app)
 
-# --- safe import & register of timeline blueprint (idempotent) ---
-try:
-    from modules.timeline import bp as timeline_bp
-    if timeline_bp.name not in app.blueprints:
-        app.register_blueprint(timeline_bp)
-    else:
-        logger.debug("Timeline blueprint '%s' already registered — skipping.", timeline_bp.name)
-except Exception:
-    logger.exception("modules.timeline import/register failed; timeline routes will be disabled")
-
 import re
 CASE_ID_RE = re.compile(r'^[a-zA-Z0-9_\-]+$')
 
@@ -721,6 +711,96 @@ def upload_file():
                         "yara_matches": yara_matches,
                         "heuristic_score": heuristic_score
                     })
+                    
+                    # ---- REPLACEMENT: ensure final_score and reasons saved for extracted artifact ----
+                    try:
+                        from modules.scoring import compute_final_score
+
+                        analysis_blob = {
+                            "ioc_matches": ioc_matches or artifact_meta.get("ioc_matches", []),
+                            "yara_matches": yara_matches or artifact_meta.get("yara_matches", []),
+                            "heuristics": artifact_meta.get("heuristics") or {"suspicion_score": heuristic_score}
+                        }
+
+                        score_info = compute_final_score(analysis_blob)
+                        artifact_meta.setdefault("analysis", {})
+                        artifact_meta["analysis"].update({
+                            "final_score": score_info.get("final_score"),
+                            "breakdown": score_info.get("breakdown", {}),
+                            "reasons": score_info.get("reasons", []),
+                            "components": score_info.get("components", {})
+                        })
+
+                        artifact_meta["ioc_matches"] = ioc_matches
+                        artifact_meta["yara_matches"] = yara_matches
+                        artifact_meta["heuristics"] = artifact_meta.get("heuristics") or analysis_blob["heuristics"]
+
+                        # --- persist into DB ---
+                        try:
+                            db_art = Artifact.query.filter_by(artifact_id=artifact_meta["artifact_id"], case_id=case_id).first()
+                            if db_art:
+                                existing = {}
+                                try:
+                                    if db_art.analysis:
+                                        existing = json.loads(db_art.analysis) if isinstance(db_art.analysis, str) else db_art.analysis
+                                except Exception:
+                                    existing = {}
+                                existing.update(artifact_meta.get("analysis", {}))
+                                db_art.analysis = json.dumps(existing)
+                                try:
+                                    if hasattr(db_art, "final_score"):
+                                        db_art.final_score = int(existing.get("final_score") or 0)
+                                except Exception:
+                                    pass
+                                db.session.add(db_art)
+                                try:
+                                    db.session.commit()
+                                except Exception:
+                                    db.session.rollback()
+                                    logger.exception("DB commit failed while persisting analysis for extracted artifact %s", artifact_meta.get("artifact_id"))
+                            else:
+                                new_art = Artifact(
+                                    artifact_id=artifact_meta.get("artifact_id"),
+                                    case_id=case_id,
+                                    original_filename=artifact_meta.get("original_filename"),
+                                    saved_filename=artifact_meta.get("saved_filename"),
+                                    saved_path=artifact_meta.get("saved_path"),
+                                    uploaded_by=artifact_meta.get("uploaded_by", uploader),
+                                    uploaded_at=datetime.now(timezone.utc),
+                                    size_bytes=artifact_meta.get("size_bytes"),
+                                    analysis=json.dumps(artifact_meta.get("analysis", {}))
+                                )
+                                db.session.add(new_art)
+                                db.session.commit()
+                        except Exception:
+                            logger.exception("Failed to persist extracted artifact analysis to DB for %s", artifact_meta.get("artifact_id"))
+
+                        # --- persist artifact JSON on disk ---
+                        try:
+                            meta_path = os.path.join(os.path.dirname(path), f"{artifact_meta['artifact_id']}.json")
+                            existing = mutils.load_signed_metadata_safe(meta_path)
+                            existing = mutils.normalize_metadata_dict(existing)
+                            existing.pop("_meta", None)
+                            existing.setdefault("analysis", {})
+                            existing["analysis"].update(artifact_meta.get("analysis", {}))
+                            for k in ("original_filename", "saved_filename", "saved_path", "uploaded_by", "uploaded_at", "size_bytes", "sha256"):
+                                if artifact_meta.get(k) is not None:
+                                    existing[k] = artifact_meta.get(k)
+                            try:
+                                mutils.write_signed_metadata(meta_path, existing)
+                            except Exception:
+                                logger.exception("write_signed_metadata failed for extracted artifact %s; attempting atomic write", artifact_meta.get("artifact_id"))
+                                try:
+                                    mutils.atomic_write_json(meta_path, existing)
+                                except Exception:
+                                    logger.exception("Fallback atomic write failed for extracted artifact metadata %s", artifact_meta.get("artifact_id"))
+                        except Exception:
+                            logger.exception("Failed to write extracted artifact metadata JSON for %s", artifact_meta.get("artifact_id"))
+
+                    except Exception:
+                        logger.exception("Scoring/persistence step failed for extracted artifact %s", artifact_meta.get("artifact_id"))
+                    # ---- END REPLACEMENT ----
+
 
                     # persist artifact JSON next to file (signed & atomic, merge safely)
                     try:
@@ -779,27 +859,6 @@ def upload_file():
                         logger.info("CoC entry added for extracted artifact %s", artifact_meta["artifact_id"])
                     except Exception:
                         logger.exception("Failed to create CoC entry for extracted artifact %s", artifact_meta.get("artifact_id"))
-
-                    try:
-                        utils_events.append_event(case_id, {
-                            "type": "artifact_uploaded",
-                            "artifact": {
-                                "artifact_id": artifact_meta["artifact_id"],
-                                "original_filename": artifact_meta.get("original_filename"),
-                                "saved_filename": artifact_meta.get("saved_filename"),
-                                "saved_path": artifact_meta.get("saved_path"),
-                                "size_bytes": artifact_meta.get("size_bytes"),
-                                "uploaded_by": artifact_meta.get("uploaded_by"),
-                                "uploaded_at": artifact_meta.get("uploaded_at"),
-                                "sha256": sha,
-                                "analysis": artifact_meta.get("analysis"),
-                            },
-                            "note": "uploaded via ZIP ingestion"
-                        })
-                        logger.info("Upload event recorded for extracted artifact %s", artifact_meta["artifact_id"])
-
-                    except Exception:
-                        logger.exception("Failed to append upload event for extracted artifact %s", artifact_meta.get("artifact_id"))
 
                         # --- NEW: Compute score for extracted artifacts ---
                         from modules import scoring, ioc, yara_rules, heuristics
@@ -865,11 +924,6 @@ def upload_file():
                                 "reasons": artifact_meta.get("analysis", {}).get("reasons") if artifact_meta.get("analysis") else None
                             }
                         }
-                        try:
-                            utils_events.append_event(case_id, event_art)
-                        except Exception:
-                            # do not fail processing if events append fails
-                            logger.exception("Failed to append per-file event for %s", artifact_meta.get("artifact_id"))
                     except Exception:
                         logger.exception("Error building/publishing per-file event for %s", artifact_meta.get("artifact_id"))
 
@@ -911,11 +965,6 @@ def upload_file():
             except Exception:
                 logger.exception("Failed creating case-level processes/events from extracted files")
 
-            try:
-                from modules.timeline import build_timeline
-            except Exception:
-                build_timeline = None
-                logger.exception("timeline builder import failed; timeline will be skipped")
 
 
             try:
@@ -924,9 +973,25 @@ def upload_file():
                 else:
                     logger.info("Timeline builder not available; skipping timeline build for case %s", case_id)
                     timeline = []
+                # ✅ Save timeline.json for frontend display
+                try:
+                    timeline_path = os.path.join(case_data_dir, "timeline.json")
+                    with open(timeline_path, "w", encoding="utf-8") as f:
+                        json.dump(timeline, f, indent=2)
+                    logger.info("Saved timeline.json for case %s", case_id)
+                except Exception:
+                    logger.exception("Failed to save timeline.json for case %s", case_id)
+
             except Exception:
                 logger.exception("Failed building timeline after zip ingestion")
                 timeline = []
+
+            # Deduplicate the per-file results (some code paths may have appended duplicates)
+            try:
+                from modules.zip_ingest import deduplicate_artifacts
+                per_file_results = deduplicate_artifacts(per_file_results)
+            except Exception:
+                logger.exception("Failed to deduplicate per_file_results; continuing with raw list")
 
             return jsonify({
                 "status": "ok",
@@ -965,7 +1030,7 @@ def upload_file():
             original_filename=metadata.get("original_filename"),
             saved_filename=metadata.get("saved_filename"),
             saved_path=metadata.get("saved_path"),
-            uploaded_by=metadata.get("uploaded_by"),
+            uploaded_by=metadata.get("uploaded_by") or uploader,
             uploaded_at=uploaded_at_dt,
             size_bytes=metadata.get("size_bytes"),
             sha256=metadata.get("sha256"),  # may be None initially; set if computed earlier
@@ -985,10 +1050,21 @@ def upload_file():
         sha256_hex, _ = compute_sha256(metadata["saved_path"])
         update_artifact_hash(case_id, metadata["artifact_id"], sha256_hex)
 
-        # --- NEW: record CoC entry for upload action ---
+        # --- NEW: record CoC entry for upload action (skip extracted ZIP files) ---
         try:
             from modules.utils import add_coc_entry
-            add_coc_entry(db, case_id, metadata["artifact_id"], actor=metadata.get("uploaded_by", "uploader"), action="uploaded", location="uploader", details={"sha256": sha256_hex})
+            artifact_id = metadata.get("artifact_id", "")
+            # ✅ Only log "uploaded" for normal files, not for extracted__* artifacts
+            if not artifact_id.startswith("extracted__"):
+                add_coc_entry(
+                    db, case_id, artifact_id,
+                    actor=metadata.get("uploaded_by", "uploader"),
+                    action="uploaded",
+                    location="uploader",
+                    details={"sha256": sha256_hex}
+                )
+            else:
+                logger.debug("Skipping CoC 'uploaded' for extracted artifact %s", artifact_id)
         except Exception:
             logger.exception("Failed to create CoC entry for upload %s/%s", case_id, metadata.get("artifact_id"))
 
@@ -1109,7 +1185,7 @@ def upload_file():
             logger.exception("Failed to update manifest.json with heuristics for %s", metadata.get("artifact_id"))
         # --- end manifest update ---
 
-                # --- Compute final suspicion score combining IOC/YARA/HEURISTICS ---
+        # --- Compute final suspicion score combining IOC/YARA/HEURISTICS ---
         try:
             from modules.scoring import compute_final_score
             analysis_blob = metadata.get("analysis") or {}
@@ -1248,18 +1324,61 @@ def upload_file():
         }
 
         try:
-            utils_events.append_event(case_id, {
-                "type": "artifact_uploaded",
-                "artifact": ev,           # full manifest-ish object (for forensic detail)
-                "summary": summary,       # small, UI-friendly summary
-                "note": "uploaded via /upload"
-            })
+            # Only append event if not already in events.json
+            events_file = os.path.join("data", case_id, "events.json")
+            already_logged = False
+            if os.path.exists(events_file):
+                try:
+                    with open(events_file, "r", encoding="utf-8") as f:
+                        existing = json.load(f)
+                        if isinstance(existing, dict):
+                            existing = existing.get("timeline_preview", [])
+                        for e in existing:
+                            if (
+                                isinstance(e, dict)
+                                and e.get("type") == "artifact_uploaded"
+                                and any(
+                                    a.get("artifact_id") == metadata.get("artifact_id")
+                                    for a in e.get("details", {}).get("artifacts", [])
+                                )
+                            ):
+                                already_logged = True
+                                break
+                except Exception:
+                    pass
+
+            if not already_logged and not metadata.get("artifact_id", "").startswith("extracted__"):
+                utils_events.append_event(case_id, {
+                    "type": "artifact_uploaded",
+                    "artifact": ev,
+                    "summary": summary,
+                    "note": "uploaded via /upload"
+                })
+            else:
+                logger.info("Skipped duplicate or extracted artifact_uploaded event for %s", metadata.get("artifact_id"))
+
         except Exception:
-            logger.exception("Failed to append upload event to events.json for %s/%s", case_id, metadata.get("artifact_id"))
+            logger.exception(
+                "Failed to append upload event to events.json for %s/%s",
+                case_id,
+                metadata.get("artifact_id")
+            )
+
     except Exception:
         logger.exception("Unexpected failure while building/publishing upload event for %s/%s", case_id, metadata.get("artifact_id"))
 
+    # ✅ Auto-generate timeline files for single uploads too
+    try:
+        case_data_dir = os.path.join("data", case_id)
+        os.makedirs(case_data_dir, exist_ok=True)
 
+        processes_path = os.path.join(case_data_dir, "processes.csv")
+        events_path = os.path.join(case_data_dir, "events.json")
+
+    except Exception:
+        logger.exception("Timeline auto-generation failed for single upload")
+
+    
     # Return both metadata and DB id for convenience
     return jsonify({
         "status": "saved",
@@ -1276,7 +1395,6 @@ def api_upload_timeline():
         "status": "gone",
         "message": "The /api/upload_timeline endpoint is deprecated. Please upload a single file or a case ZIP to /upload which now handles both single-file and ZIP ingestion and will generate timelines automatically."
     }), 410
-    
 
 
 @app.route("/dashboard")
@@ -1287,45 +1405,95 @@ def dashboard():
     """
     case_id = request.args.get("case_id", "case001")
 
-    # load list of all cases for the case switcher (simple name list)
+    # load list of all cases for the case switcher
     try:
         case_rows = Case.query.order_by(Case.created_at.desc()).all()
-        cases_list = [c.to_dict() for c in case_rows]  # each dict should at least include case_id
+        cases_list = [c.to_dict() for c in case_rows]
     except Exception:
         cases_list = []
 
-    # Try to load case from DB; if missing fall back to manifest count
+    # Try to load case from DB; fallback to manifest if missing
     case = Case.query.filter_by(case_id=case_id).first()
     if case:
         artifact_rows = Artifact.query.filter_by(case_id=case_id).order_by(Artifact.uploaded_at.desc()).all()
         artifacts = [r.to_dict() for r in artifact_rows]
+        # ---- FIX: normalize/parsing for artifacts coming from DB (dicts) ----
+        for a in artifacts:
+            try:
+                val = a.get("analysis")
+                if isinstance(val, str):
+                    try:
+                        a["analysis"] = json.loads(val)
+                    except Exception:
+                        a["analysis_raw"] = val
+                        a["analysis"] = {}
+                elif val is None:
+                    a["analysis"] = {}
+                    if a.get("heuristics"):
+                        a["analysis"]["heuristics"] = a.get("heuristics")
+                    if a.get("suspicion_score") is not None:
+                        a["analysis"]["suspicion_score"] = a.get("suspicion_score")
+                if not isinstance(a["analysis"], dict):
+                    a["analysis"] = {}
+            except Exception as e:
+                logger.warning("Failed to normalize analysis for artifact %s: %s", a.get("artifact_id"), e)
+                a["analysis"] = {}
+        # ---- END FIX ----
+
         artifact_count = len(artifacts)
         case_info = case.to_dict()
     else:
-        # fallback: existing manifest behavior (no DB case present)
         manifest = load_manifest(case_id)
         artifacts = manifest.get("artifacts", [])
         artifact_count = len(artifacts)
         case_info = {"case_id": case_id, "created_at": None, "artifact_count": artifact_count}
-        
+
+    # --- FIX: normalize analysis JSON and compute scores safely ---
+    total_score = 0
     for art in artifacts:
-        # Attach parsed or serialized analysis data for Why? modal
-        if isinstance(art.get("analysis"), dict):
-            art["data_analysis"] = json.dumps(art["analysis"])
-        else:
+        analysis = art.get("analysis") or {}
+        if isinstance(analysis, str):
+            try:
+                analysis = json.loads(analysis)
+            except Exception:
+                analysis = {}
+        if not isinstance(analysis, dict):
+            analysis = {}
+
+        final_score = None
+        if isinstance(analysis.get("final_score"), (int, float)):
+            final_score = int(analysis.get("final_score"))
+        elif isinstance(analysis.get("final_score"), str):
+            try:
+                final_score = int(float(analysis.get("final_score")))
+            except Exception:
+                final_score = None
+        if final_score is None:
+            final_score = int(analysis.get("suspicion_score") or analysis.get("score") or 0)
+
+        reasons = analysis.get("final_reasons") or analysis.get("reasons") or []
+
+        art["final_score"] = final_score
+        art["summary_reasons"] = reasons
+        try:
+            art["data_analysis"] = json.dumps(analysis)
+        except Exception:
             art["data_analysis"] = "{}"
 
-    # Render template with artifacts read from DB (or fallback)
+        total_score += (final_score or 0)
+
+    suspicion_score = round(total_score / len(artifacts), 2) if artifacts else 0
+
+    # ✅ Always return a response
     return render_template(
         "dashboard.html",
         case_id=case_id,
         artifact_count=artifact_count,
-        suspicion_score=0,
+        suspicion_score=suspicion_score,
         artifacts=artifacts,
         case_info=case_info,
-        cases=cases_list,           # <-- new: pass all cases
+        cases=cases_list,
     )
-
 
 @app.route("/report")
 def report():
@@ -2322,12 +2490,16 @@ def api_coc_add():
 
         # Append CoC timeline event (non-blocking)
         try:
+            event_type = "coc_verify" if action in ("metadata_verified", "metadata_tampered") else (
+                "artifact_uploaded" if action == "uploaded" else "coc_add"
+            )
             utils_events.append_event(case_id, {
-                "type": "coc_add",
+                "type": event_type,
                 "actor": actor,
                 "action": action,
                 "artifact_id": artifact_id,
-                "signature": signature
+                "signature": signature,
+                "details": details
             })
         except Exception:
             logger.exception("Failed to append CoC timeline event for %s/%s", case_id, artifact_id)
