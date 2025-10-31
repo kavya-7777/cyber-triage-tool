@@ -1,3 +1,5 @@
+<!-- templates/home.html -->
+
 {% extends "base.html" %}
 {% block content %}
 <section class="text-center py-5" style="min-height:70vh; display:flex; flex-direction:column; justify-content:center; align-items:center;">
@@ -11,7 +13,6 @@
     Automated evidence analysis, tamper-proof audits, and court-ready reports
   </p>
 
-  <!-- Upload button: points to the upload *page* (GET). -->
   <a href="{{ url_for('upload_file') }}"
      class="btn"
      style="background:#00ff88; color:#001814; padding:14px 30px; font-weight:700; border-radius:10px; margin-top:22px; box-shadow: 0 6px 18px rgba(0,0,0,0.25); text-decoration:none;">

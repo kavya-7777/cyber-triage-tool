@@ -21,11 +21,6 @@ def dump_analysis_field(obj: Any) -> str:
         return json.dumps({})
 
 def analyze_artifact(file_path, case_id=None, artifact_id=None):
-    """
-    Perform IOC, YARA, and heuristic analysis on a given file.
-    If case_id and artifact_id are provided, use artifact-aware scanning;
-    otherwise, fallback to direct file scanning.
-    """
     from modules import ioc, yara
     import heuristics
 
@@ -62,7 +57,6 @@ def analyze_artifact(file_path, case_id=None, artifact_id=None):
         "heuristics": heuristics_report
     }
 
-
 def summarize_analysis(analysis_results: Dict) -> Dict:
     """
     Create a compact summary of IOC, YARA, and heuristic results.
@@ -83,7 +77,7 @@ def merge_analysis_fields(field1: Dict, field2: Dict) -> Dict:
             elif isinstance(merged[key], dict) and isinstance(value, dict):
                 merged[key] = merge_analysis_fields(merged[key], value)
             else:
-                merged[key] = value  # overwrite with field2's value
+                merged[key] = value 
         else:
             merged[key] = value
     return merged

@@ -1,4 +1,4 @@
-<!-- templates/report.html (PDF-friendly, dark-themed report preview) -->
+<!-- templates/report.html -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -7,7 +7,6 @@
   <title>Case Report — {{ case_id }}</title>
 
   <style>
-    /* Keep PDF-friendly styling but visually aligned with the app */
     body { font-family: "Helvetica", Arial, sans-serif; color: #111; margin: 24px; background: #fff; }
     header { border-bottom: 2px solid #ddd; padding-bottom: 8px; margin-bottom: 16px; }
     h1 { font-size: 20px; margin: 0 0 4px 0; }
@@ -24,41 +23,39 @@
   </style>
 </head>
 <body>
-  <header>
-    <h1>Case Report — {{ case_id }}</h1>
-    <div class="meta">
-  Generated: {{ generated_at | ist_time if generated_at is defined else "-" }} ·
-  {% if processes_exists %} processes.csv present · {% endif %}
-  {% if events_exists %} events.json present {% endif %}
-</div>
+  <header style="border-bottom:2px solid #ddd; padding-bottom:8px; margin-bottom:16px;">
+  <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+    <h1 style="margin:0; font-size:20px;">Case Report — {{ case_id }}</h1>
+    <a href="{{ url_for('report_pdf', case_id=case_id) }}"
+       title="Download PDF Report"
+       style="color:black; text-decoration:none;">
+      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18"
+           fill="none" stroke="black" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round"
+           viewBox="0 0 24 24">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+        <polyline points="7 10 12 15 17 10" />
+        <line x1="12" y1="15" x2="12" y2="3" />
+      </svg>
+    </a>
+  </div>
 
-
-    <div style="margin-top:8px;">
-      <a style="display:inline-block;padding:6px 10px;border-radius:6px;background:#2f855a;color:#fff;text-decoration:none;font-size:12px;margin-right:6px;" href="{{ url_for('report_pdf', case_id=case_id) }}">Download PDF</a>
-      <a style="display:inline-block;padding:6px 10px;border-radius:6px;background:#4a5568;color:#fff;text-decoration:none;font-size:12px;" href="{{ url_for('report_bundle', case_id=case_id) }}">Download Bundle (ZIP)</a>
-    </div>
-  </header>
-
-  <section>
-    <h2>Summary</h2>
-    <div class="small">
-      Artifacts: {{ artifacts|length }}<br/>
-      Processes CSV: {{ 'yes' if processes_exists else 'no' }} · Events JSON: {{ 'yes' if events_exists else 'no' }}
-    </div>
-  </section>
+  <div class="meta" style="font-size:12px; color:#555;">
+    Generated: {{ generated_at | ist_time if generated_at is defined else "-" }} ·
+  </div>
+</header>
 
   <section>
     <h2>Artifacts</h2>
-
     {% if artifacts and artifacts|length %}
       <table>
         <thead>
           <tr>
-            <th style="width:22%;">Artifact ID / filename</th>
+            <th style="width:22%;">File Details</th>
             <th style="width:10%;">Size</th>
             <th style="width:14%;">Uploaded</th>
             <th style="width:10%;">Score</th>
-            <th>Key analysis / notes (or raw metadata)</th>
+            <th>Key analysis</th>
           </tr>
         </thead>
         <tbody>
@@ -72,10 +69,11 @@
           {% if analysis is none %}{% set analysis = {} %}{% endif %}
           {% set final_score = (analysis.get('final_score') if analysis is mapping else (a.get('final_score') if a is mapping else (a.final_score if a is defined and a.final_score is defined else None))) %}
           <tr>
-            <td>
-              <div><code>{{ artifact_id }}</code></div>
-              <div class="muted">{{ filename }}</div>
-            </td>
+            <td style="word-break: break-all; white-space: normal;">
+  <div>{{ filename }}</div>
+  <div class="muted"><code style="word-break: break-all; white-space: normal;">{{ artifact_id }}</code></div>
+</td>
+
             <td class="small">
               {% if size_bytes %}{{ size_bytes }} bytes{% else %}-{% endif %}
             </td>
@@ -100,7 +98,7 @@
               {% if analysis is mapping %}
                 {% if analysis.final_reasons %}
                   <ul>
-                    {% for r in analysis.final_reasons[:4] %}
+                    {% for r in analysis.final_reasons %}
                       <li>{{ r }}</li>
                     {% endfor %}
                   </ul>
@@ -114,11 +112,6 @@
               {% else %}
                 <div class="muted">no analysis metadata</div>
               {% endif %}
-
-              <details style="margin-top:6px;">
-                <summary class="small">Show raw metadata</summary>
-                <pre class="small" style="white-space:pre-wrap; max-height:300px; overflow:auto;">{{ a | tojson(indent=2) }}</pre>
-              </details>
             </td>
           </tr>
           {% endfor %}
@@ -133,9 +126,10 @@
 
   <section>
     <h2>Included files</h2>
+    <div class="small">
+      Artifacts: {{ artifacts|length }}<br/>
+      </div>
     <ul class="small">
-      {% if processes_exists %}<li>{{ processes_path if processes_path is defined else 'processes.csv' }}</li>{% endif %}
-      {% if events_exists %}<li>{{ events_path if events_path is defined else 'events.json' }}</li>{% endif %}
       {% for a in artifacts %}<li>artifact metadata: {{ a.original_filename if a.original_filename is defined else (a.artifact_id if a.artifact_id is defined else 'unknown') }}</li>{% endfor %}
     </ul>
   </section>

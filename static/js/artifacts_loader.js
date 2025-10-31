@@ -1,5 +1,4 @@
 // static/js/artifacts_loader.js
-// Corrected & robust CoC + Verify wiring (fixes attribute mismatches + fallback behaviors)
 
 "use strict";
 
@@ -35,8 +34,6 @@ async function fetchJsonWrapped(url, opts) {
   }
   return { ok: resp.ok, status: resp.status, data: data };
 }
-// ------- end helpers -------
-
 
 // Robust upload helper you can wire to your upload form
 async function robustUploadFormSubmit(formEl) {
@@ -71,7 +68,6 @@ async function robustUploadFormSubmit(formEl) {
   }
 }
 
-
 // ArtifactsLoader small module (keeps previous functionality)
 window.ArtifactsLoader = (function(){
   async function fetchCounts(caseId){
@@ -105,14 +101,9 @@ window.ArtifactsLoader = (function(){
     renderBadge(container, counts);
   }
 
-  // Expose the upload helper in the loader for convenience
   return { init, robustUploadFormSubmit };
 })();
 
-
-// -----------------------------
-// Modal & Why? helper script
-// -----------------------------
 (function(){
   // small utilities
   function escTextNode(parent, text) {
@@ -288,16 +279,13 @@ window.ArtifactsLoader = (function(){
       });
     }, 80);
 
-        // --- show the Why? modal (ensure bootstrap is loaded) ---
     try {
       var modalEl = document.getElementById('whyModal');
       if (modalEl) {
         if (window.bootstrap && typeof bootstrap.Modal === 'function') {
-          // get or create modal instance and show it
           var modalInstance = bootstrap.Modal.getOrCreateInstance(modalEl);
           modalInstance.show();
         } else {
-          // bootstrap not available yet — log a helpful message
           console.warn("Bootstrap Modal API not available; ensure bootstrap.bundle.js is loaded before artifact_loader.js");
         }
       } else {
@@ -308,10 +296,9 @@ window.ArtifactsLoader = (function(){
     }
 
 
-  }, 200)); // debounce 200ms
+  }, 200)); 
 
 })();
-
 
 // animate progress bars that have a data-width attribute
 document.addEventListener('DOMContentLoaded', function(){
@@ -328,12 +315,7 @@ document.addEventListener('DOMContentLoaded', function(){
   }, 80);
 });
 
-
-// -----------------------------
-// Verify & CoC UI wiring
-// -----------------------------
 document.addEventListener('DOMContentLoaded', function () {
-  // init bootstrap tooltips if available
   try {
     var tList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
     tList.forEach(function(el) { new bootstrap.Tooltip(el); });
@@ -400,7 +382,6 @@ document.addEventListener('DOMContentLoaded', function () {
       }
     });
   });
-
 
   // CoC per-artifact: open modal and load entries from /api/coc/<case>/<artifact>
   async function loadCocForArtifact(caseId, artifactId) {
@@ -553,4 +534,4 @@ document.addEventListener('DOMContentLoaded', function () {
     }
   };
 
-}); // DOMContentLoaded end
+});

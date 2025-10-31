@@ -3,17 +3,13 @@ from .db import db
 from datetime import datetime
 import json
 
-
 class Case(db.Model):
     __tablename__ = "cases"
     id = db.Column(db.Integer, primary_key=True)
     case_id = db.Column(db.String(100), unique=True, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     description = db.Column(db.String(255), nullable=True)
-
-
     artifacts = db.relationship("Artifact", backref="case", lazy=True, cascade="all, delete-orphan")
-
 
     def to_dict(self):
         return {
@@ -21,7 +17,6 @@ class Case(db.Model):
             "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None,
             "artifact_count": len(self.artifacts)
         }
-
 
 class Artifact(db.Model):
     __tablename__ = "artifacts"
@@ -34,13 +29,11 @@ class Artifact(db.Model):
     uploaded_by = db.Column(db.String(100))
     uploaded_at = db.Column(db.DateTime)
     size_bytes = db.Column(db.Integer)
-
-    # NEW columns
     sha256 = db.Column(db.String(128), index=True, nullable=True)
     is_duplicate = db.Column(db.Boolean, default=False, nullable=False)
-    duplicate_of = db.Column(db.String(64), nullable=True)  # artifact_id this duplicates
+    duplicate_of = db.Column(db.String(64), nullable=True)  
 
-    analysis = db.Column(db.Text) # JSON stored as string
+    analysis = db.Column(db.Text) 
 
 
     def to_dict(self):
@@ -55,7 +48,6 @@ class Artifact(db.Model):
                     analysis_parsed = str(self.analysis)
             except Exception:
                 analysis_parsed = self.analysis
-
 
         return {
             "artifact_id": self.artifact_id,
@@ -79,6 +71,7 @@ class ChainOfCustody(db.Model):
     artifact_id = db.Column(db.String(64), nullable=False, index=True)
     actor = db.Column(db.String(100))
     action = db.Column(db.String(100))
+    filename = db.Column(db.String)  
     from_entity = db.Column(db.String(255))
     to_entity = db.Column(db.String(255))
     reason = db.Column(db.String(255))
@@ -103,7 +96,6 @@ class ChainOfCustody(db.Model):
             "ts": (self.ts.isoformat() + "Z") if self.ts else None
         }
 
-# Add this class definition near the bottom of modules/models.py (after Artifact)
 class Audit(db.Model):
     __tablename__ = "audits"
     id = db.Column(db.Integer, primary_key=True)

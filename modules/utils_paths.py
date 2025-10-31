@@ -1,11 +1,9 @@
+# modules/utils_paths.py
+
 import os
 import glob
 
 def resolve_artifact_path(case_id, artifact_id):
-    """
-    Try to resolve the actual file path for an artifact.
-    Handles both normal and ZIP-extracted artifacts.
-    """
     base = os.path.join("evidence", case_id, "artifacts")
 
     # 1️⃣ Normal path

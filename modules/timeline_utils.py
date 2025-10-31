@@ -6,11 +6,6 @@ import uuid
 from typing import Dict
 
 def append_json_events(src_json: str, out_json: str) -> int:
-    """
-    Append events from src_json into out_json (a JSON array).
-    Accepts src_json that is a list or { "events": [...] } or single object (will be wrapped).
-    Returns number of events appended.
-    """
     def load_candidates(p):
         with open(p, "r", encoding="utf-8") as fh:
             return json.load(fh)
@@ -23,7 +18,6 @@ def append_json_events(src_json: str, out_json: str) -> int:
     else:
         items = [src]
 
-    # ensure out_json exists and is a list
     existing = []
     if os.path.exists(out_json):
         try:

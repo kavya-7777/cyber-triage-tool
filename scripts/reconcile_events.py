@@ -1,25 +1,17 @@
 # scripts/reconcile_events.py
-"""
-Rebuild/repair events.json for a case from DB and manifest.
-Usage:
-  python scripts/reconcile_events.py case001
-This script creates a backup of the old events.json (if present) under data/<case_id>/backups/
-and writes a new data/<case_id>/events.json containing a single event with all artifacts.
-"""
 import os
 import sys
 import json
 from datetime import datetime, timezone
-from modules.db import db  # requires environment where modules is importable
+from modules.db import db 
 from modules import models
-from modules.utils import ensure_case_dirs, manifest_path_for_case, load_manifest  # note: load_manifest is in app.py; we replicate minimal logic
+from modules.utils import ensure_case_dirs, manifest_path_for_case, load_manifest
 from modules.models import Artifact
 
 def iso_now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 def rebuild_events(case_id):
-    # gather artifacts from DB
     arts = []
     try:
         rows = Artifact.query.filter_by(case_id=case_id).all()

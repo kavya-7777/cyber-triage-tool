@@ -1,3 +1,4 @@
+<!-- templates/dashboard.html -->
 {% extends "base.html" %}
 {% block title %}Dashboard — {{ case_id }}{% endblock %}
 
@@ -5,24 +6,22 @@
 <div class="hero mb-4">
   <div class="d-flex justify-content-between align-items-start">
     <div>
-      <h1 class="mb-1"><span class="accent">Case</span> <small class="text-muted">—</small> <small class="muted">{{ case_id }}</small></h1>
+      <h1 class="mb-1"><span class="accent">Case</span> <small class="text-white">—</small> <small class="muted">{{ case_id }}</small></h1>
       <p class="lead">Merged evidence view · explainable scoring · tamper-proof audits</p>
     </div>
 
     <div class="text-end">
       <div id="timeline-artifact-badge" class="mb-2"></div>
-      <div class="d-flex gap-2">
-        <a class="btn btn-outline-secondary" href="{{ url_for('report') }}?case_id={{ case_id }}">Report Preview</a>
-        <a class="btn btn-outline-primary" href="{{ url_for('api_manifest', case_id=case_id) }}">Manifest (JSON)</a>
-      </div>
     </div>
   </div>
 </div>
 
 <div class="row g-3 mb-4">
-  <!-- LEFT column: Artifact count + case switcher + CoC (moved up) -->
-  <div class="col-md-3">
-    <div class="d-flex flex-column gap-3">
+  <!-- LEFT COLUMN: Case switcher + Artifacts + Suspicion score -->
+  <div class="col-md-4">
+    <div class="d-flex flex-column gap-3 h-100">
+      
+      <!-- Case Switcher -->
       <div class="card">
         <div class="card-body">
           <form id="case-switcher-form" class="mb-2" method="get" action="{{ url_for('dashboard') }}">
@@ -39,92 +38,78 @@
               <button class="btn btn-outline-secondary" type="submit">Go</button>
             </div>
           </form>
-
-          <div class="d-flex gap-2">
+          <div class="d-flex gap-2" style = "margin-top: 20px;">
             <a href="{{ url_for('view_case_coc', case_id=case_id) }}" class="btn btn-outline-warning">Case CoC</a>
             <a class="btn btn-outline-secondary" href="{{ url_for('report') }}?case_id={{ case_id }}">Report Preview</a>
           </div>
         </div>
       </div>
 
+      <!-- Artifact Count -->
       <div class="card">
-        <div class="card-body h-100">
+        <div class="card-body">
           <h6 class="card-subtitle mb-2" style="color: #e6e6e6;">Artifacts</h6>
           <h3 class="mb-0" style="color: #d7dbd9;">{{ artifact_count }}</h3>
         </div>
       </div>
-    </div>
-  </div>
 
-  <!-- CENTER column: Suspicion score card (keeps inline sparkline) -->
-  <div class="col-md-4">
-    <div class="card h-100" style="border-left:4px solid var(--accent);">
-      <div class="card-body">
-        <h6 class="card-subtitle text" style="color: #00ff88;">Suspicion Score (case)</h6>
+      <!-- Suspicion Score -->
+      <div class="card flex-fill" style="border-left:4px solid var(--accent);">
+        <div class="card-body">
+          <h6 class="card-subtitle" style="color: #00ff88;">Suspicion Score (case)</h6>
 
-        {# Gather artifact scores robustly #}
-        {% set ns = namespace(scores=[]) %}
-        {% for art in artifacts %}
-          {% set analysis = art.analysis if art.analysis is not none else (art.get('analysis') if art.get is defined else None) %}
-          {% if analysis and analysis is mapping %}
-            {% set fs = analysis.get('final_score') or analysis.get('suspicion_score') or (analysis.get('heuristics') and analysis.get('heuristics', {}).get('suspicion_score')) %}
-            {% if fs is not none %}
-              {% set ns.scores = ns.scores + [fs] %}
+          {% set ns = namespace(scores=[]) %}
+          {% for art in artifacts %}
+            {% set analysis = art.analysis if art.analysis is not none else (art.get('analysis') if art.get is defined else None) %}
+            {% if analysis and analysis is mapping %}
+              {% set fs = analysis.get('final_score') or analysis.get('suspicion_score') or (analysis.get('heuristics') and analysis.get('heuristics', {}).get('suspicion_score')) %}
+              {% if fs is not none %}
+                {% set ns.scores = ns.scores + [fs] %}
+              {% endif %}
             {% endif %}
-          {% endif %}
-        {% endfor %}
+          {% endfor %}
 
-        {% if ns.scores and ns.scores|length > 0 %}
-          {% set case_score = ns.scores|max %}
-          <div class="d-flex align-items-center">
-            <div class="me-3">
-              <span class="badge {% if case_score >= 70 %}bg-danger{% elif case_score > 30 %}bg-warning text-dark{% else %}bg-success{% endif %}" style="font-size:1.05rem;padding:0.5rem 0.7rem">{{ case_score }}%</span>
+          {% if ns.scores %}
+            {% set case_score = ns.scores|max %}
+            <div class="d-flex align-items-center mt-2">
+              <span class="badge {% if case_score >= 70 %}bg-danger{% elif case_score > 30 %}bg-warning text-dark{% else %}bg-success{% endif %}" style="font-size:1.05rem;padding:0.5rem 0.7rem;">{{ case_score }}%</span>
+              <div class="ms-3" style="color: #b7b8b7;">Case score = max(artifact scores)</div>
             </div>
-            <div class="flex-fill">
-              <div class="new" style="color: #b7b8b7;">Case score = max(artifact scores) — expand artifacts to inspect why</div>
+          {% else %}
+            <h3><span class="text-muted">—</span></h3>
+          {% endif %}
+
+          {% set active_weights = None %}
+          {% for art in artifacts %}
+            {% set a_analysis = art.analysis if art.analysis is not none else (art.get('analysis') if art.get is defined else None) %}
+            {% if not active_weights and a_analysis and a_analysis is mapping and a_analysis.get('weights') %}
+              {% set active_weights = a_analysis.get('weights') %}
+            {% endif %}
+          {% endfor %}
+          {% if not active_weights %}
+            {% set active_weights = {'ioc': 0.40, 'yara': 0.30, 'heuristics': 0.30} %}
+          {% endif %}
+
+          <div class="mt-3 small">
+            <strong>Weights</strong>
+            <div class="d-flex gap-2 mt-1">
+              <span class="badge bg-secondary">IOC {{ (active_weights.ioc * 100)|round(0) }}%</span>
+              <span class="badge bg-secondary">YARA {{ (active_weights.yara * 100)|round(0) }}%</span>
+              <span class="badge bg-secondary">Heuristics {{ (active_weights.heuristics * 100)|round(0) }}%</span>
             </div>
           </div>
-        {% else %}
-          <h3><span class="text-muted">—</span></h3>
-        {% endif %}
-
-        {# Reveal active weight config from artifacts if present #}
-        {% set active_weights = None %}
-        {% for art in artifacts %}
-          {% set a_analysis = art.analysis if art.analysis is not none else (art.get('analysis') if art.get is defined else None) %}
-
-          {% if not active_weights and a_analysis and a_analysis is mapping and a_analysis.get('weights') %}
-            {% set active_weights = a_analysis.get('weights') %}
-          {% endif %}
-        {% endfor %}
-        {% if not active_weights %}
-          {% set active_weights = {'ioc': 0.40, 'yara': 0.30, 'heuristics': 0.30} %}
-        {% endif %}
-
-        <div class="mt-3 small">
-          <strong>Weights</strong>
-          <div class="d-flex gap-2 mt-1">
-            <span class="badge bg-secondary">IOC {{ (active_weights.ioc * 100)|round(0) }}%</span>
-            <span class="badge bg-secondary">YARA {{ (active_weights.yara * 100)|round(0) }}%</span>
-            <span class="badge bg-secondary">Heuristics {{ (active_weights.heuristics * 100)|round(0) }}%</span>
-          </div>
-          <div class="mt-2"  style="color: #b9b9b9;">Editable via <code>data/weights.json</code>.</div>
         </div>
-
-        <!-- small inline sparkline (keeps quick glance) -->
-        
       </div>
     </div>
   </div>
 
-  <!-- RIGHT column: Big Component Comparison chart (moved into empty space) -->
-  <div class="col-md-4">
+  <!-- RIGHT COLUMN: Chart -->
+  <div class="col-md-8">
     <div class="card h-100">
       <div class="card-body d-flex flex-column">
         <h6 class="card-subtitle mb-3" style="color:#00ff88;">Component Comparison (IOC / YARA / Heuristics)</h6>
-        <!-- bigger canvas that fills remaining card body -->
-        <div style="flex:1 1 auto; min-height:260px;">
-          <canvas id="componentChart" height="320" style="width:100%; height:100%;"></canvas>
+        <div style="flex:1 1 auto; min-height:380px;">
+          <canvas id="componentChart" style="width:100%; height:100%;"></canvas>
         </div>
         <div class="mt-2 small text-muted">
           <em>Hover a point to see the full filename and per-component value.</em>
@@ -133,7 +118,6 @@
     </div>
   </div>
 </div>
-
 
 <h5 class="mt-3"  style="color: #ebe8e8;">Artifacts list</h5>
 
@@ -155,7 +139,7 @@
         {% for a in artifacts %}
           {% set aid = a.artifact_id %}
           <tr id="row-{{ aid }}" data-artifact-id="{{ aid }}">
-            <td style="font-family:monospace">
+            <td class="artifact-id-cell" style="font-family:monospace; word-break:break-all; white-space:normal;">
               {{ aid }}
               {% set is_dup = (a.is_duplicate if a is mapping else (a.get('is_duplicate') if a.get is defined else False)) %}
               {% set dup_of = (a.duplicate_of if a is mapping else (a.get('duplicate_of') if a.get is defined else None)) %}
@@ -170,7 +154,9 @@
 
             <td>{{ a.original_filename }}</td>
             <td>{{ a.uploaded_by }}</td>
-            <td>{{ a.uploaded_at | ist_time }}</td>
+            <td class="uploaded-at text-muted small" style="white-space: normal; word-break: break-word; overflow-wrap: anywhere;">
+              {{ a.uploaded_at | ist_time }}
+            </td>
             <td>{{ a.size_bytes }}</td>
 
             <td>
@@ -193,22 +179,6 @@
                       {% endif %}
                     </div>
                   </div>
-                </div>
-
-                {% set ioc_matches = analysis.get('ioc_matches', []) %}
-                {% set yara_matches = analysis.get('yara_matches', []) %}
-                {% set heur = analysis.get('heuristics') %}
-
-                <div class="mb-2">
-                  {% if ioc_matches and ioc_matches|length > 0 %}
-                    <span class="badge bg-warning text-dark me-1">IOC {{ ioc_matches|length }}</span>
-                  {% endif %}
-                  {% if yara_matches and yara_matches|length > 0 %}
-                    <span class="badge bg-danger me-1">YARA {{ yara_matches|length }}</span>
-                  {% endif %}
-                  {% if heur %}
-                    <span class="badge bg-info me-1">Heur {{ heur.get('suspicion_score', 'N/A') }}</span>
-                  {% endif %}
                 </div>
 
                 {# compact blob for Why modal #}
@@ -250,6 +220,31 @@
                     "yara_matches": _ns.yaras,
                     "heuristics": analysis.get('heuristics') or {}
                   } %}
+                
+                <ul class="analysis-list mb-2">
+  {% if ioc_matches and ioc_matches|length > 0 %}
+    <li><span class="badge bg-warning text-dark">IOC</span> — {{ ioc_matches|length }} matches</li>
+  {% endif %}
+  {% if yara_matches and yara_matches|length > 0 %}
+    <li><span class="badge bg-danger">YARA</span> — {{ yara_matches|length }} matches</li>
+  {% endif %}
+  {% if heur %}
+    <li><span class="badge bg-info">Heuristics</span> — Score {{ heur.get('suspicion_score', 'N/A') }}</li>
+  {% endif %}
+  {% if compact_blob.reasons and compact_blob.reasons|length > 0 %}
+    <li>
+      <strong>Top reasons:</strong>
+      <ul class="small mt-1">
+        {% for reason in compact_blob.reasons[:3] %}
+          <li>{{ reason }}</li>
+        {% endfor %}
+        {% if compact_blob.reasons|length > 3 %}
+          <li class="text-muted">… and {{ compact_blob.reasons|length - 3 }} more</li>
+        {% endif %}
+      </ul>
+    </li>
+  {% endif %}
+</ul>
 
                 <div class="d-inline-block ms-2">
                   <button class="btn btn-sm btn-outline-primary why-btn"
@@ -262,50 +257,36 @@
                   </button>
                 </div>
 
-                {% if compact_blob.reasons and compact_blob.reasons|length > 0 %}
-                  <div class="mt-1 small text-muted">Top: {{ compact_blob.reasons[:3] | join(', ') }}{% if compact_blob.reasons|length > 3 %}...{% endif %}</div>
-                {% endif %}
-
               {% else %}
                 <span class="text-muted">Pending analysis</span>
               {% endif %}
             </td>
 
-            <td>
-              {% if a.saved_filename %}
-                <a class="btn btn-sm btn-outline-primary" href="{{ url_for('download_artifact', case_id=case_id, artifact_filename=a.saved_filename) }}">Download</a>
-              {% endif %}
-              <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('api_manifest', case_id=case_id) }}#{{ a.artifact_id }}">Manifest</a>
-              <a class="btn btn-sm btn-outline-info" href="{{ url_for('api_ioc_check', case_id=case_id, artifact_id=a.artifact_id) }}">Re-run IOC</a>
-              <a class="btn btn-sm btn-outline-danger" href="{{ url_for('api_yara_check', case_id=case_id, artifact_id=a.artifact_id) }}">Re-run YARA</a>
+<td class="action-cell">
+  <div class="action-buttons">
+    <button type="button"
+            class="btn btn-sm btn-action btn-verify verify-btn"
+            data-case="{{ case_id|e }}"
+            data-art="{{ aid|e }}">
+      ✅ Verify
+    </button>
 
-              <div class="mt-2 d-flex gap-1">
-                <button type="button" class="btn btn-sm btn-outline-success verify-btn" data-case="{{ case_id|e }}" data-art="{{ aid|e }}">Verify</button>
-                <button type="button" class="btn btn-sm btn-outline-secondary coc-btn" data-case="{{ case_id|e }}" data-art="{{ aid|e }}">CoC</button>
-              </div>
-
-              <div class="mt-2 small" id="verify-result-{{ aid }}"></div>
-              <div class="mt-2 small coc-list" id="coc-list-{{ aid|e }}"></div>
-            </td>
+    <button type="button"
+            class="btn btn-sm btn-action btn-coc coc-btn"
+            data-case="{{ case_id|e }}"
+            data-art="{{ aid|e }}">
+      📜 CoC
+    </button>
+  </div>
+</td>
           </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
 
-  <div class="mt-3 small text-muted">
-    <strong>Legend:</strong>
-    <ul>
-      <li><strong>IOC confidence</strong> — source-level confidence (high/medium/low) from IOC feed.</li>
-      <li><strong>YARA severity</strong> — rule author severity used to surface critical detections.</li>
-      <li><strong>Weights</strong> — control relative contribution of IOC/YARA/Heuristics to final score.</li>
-    </ul>
-  </div>
-<!-- === Component Comparison Chart === -->
-
-
 {% else %}
-  <div class="alert alert-warning">No artifacts found for this case. Upload one from the <a href="{{ url_for('home') }}">Upload page</a>.</div>
+  <div class="alert alert-secondary">No artifacts found for this case. Upload one from the <a href="{{ url_for('home') }}">Upload page</a>.</div>
 {% endif %}
 
 {# Why modal (shared) #}
@@ -314,8 +295,7 @@
     <div class="modal-content">
       <div class="modal-header">
         <h5 class="modal-title">Why this score?</h5>
-        <button type="button" class="btn btn-sm btn-outline-secondary me-2" id="copyWhyBtn">Copy JSON</button>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body pb-3">
         <div id="why-header" class="mb-3 d-flex align-items-center">
@@ -333,278 +313,313 @@
           <ul id="why-reasons" class="small"></ul>
         </div>
       </div>
+    </div>
+  </div>
+</div>
 
+{# === Chain of Custody Modal === #}
+<div class="modal fade" id="cocModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Chain of Custody</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="cocModalBody" class="small"></div>
+      </div>
       <div class="modal-footer">
-        <small class="text-muted me-auto">Scores are deterministic & explainable. See <code>data/weights.json</code> for config.</small>
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+        <button type="button" class="btn btn-outline-white" data-bs-dismiss="modal">Close</button>
       </div>
     </div>
   </div>
 </div>
 
-{# ========== NEW: Combined Verify + CoC client script ========== #}
 <style>
-  /* small styles to make verify/coc result clearer */
+.table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.table thead th {
+  background-color: rgba(255,255,255,0.08);
+  color: #00ffcc;
+  font-weight: 600;
+  text-align: left;           
+  vertical-align: middle;
+  border-bottom: 2px solid rgba(255,255,255,0.15);
+  border-right: 1px solid rgba(255,255,255,0.08);
+  padding: 10px 12px;
+  white-space: nowrap;
+}
+
+.table tbody td {
+  border-right: 1px solid rgba(255,255,255,0.06);
+  vertical-align: middle;
+  text-align: left;
+  padding: 8px 12px;
+}
+
+.table thead th:last-child,
+.table tbody td:last-child {
+  border-right: none;
+}
+
+.table tbody tr {
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+.table-striped tbody tr:nth-of-type(odd) {
+  background-color: rgba(255,255,255,0.02);
+}
+.table-striped tbody tr:nth-of-type(even) {
+  background-color: rgba(255,255,255,0.04);
+}
+
+.table tbody tr:hover {
+  background-color: rgba(0,255,136,0.08);
+}
+
+.table tbody td.small,
+.table tbody td .small {
+  font-size: 0.85rem;
+}
+
+.table td:nth-child(1) { width: 16%; }   /* Artifact ID */
+.table td:nth-child(2) { width: 18%; }   /* Filename */
+.table td:nth-child(3) { width: 10%; }   /* Uploaded By */
+.table td:nth-child(4) { width: 16%; }   /* Uploaded At */
+.table td:nth-child(5) { width: 10%; }   /* Size */
+.table td:nth-child(6) { width: 20%; }   /* Analysis */
+.table td:nth-child(7) { width: 10%; }   /* Actions */
+</style>
+
+<style>
   .verify-ok { color: var(--accent); font-weight: 600; }
   .verify-bad { color: #e67e22; font-weight: 600; }
   .coc-list ul { margin: 0 0 0 18px; padding: 0; }
   .coc-list li { margin: 6px 0; }
 </style>
 
-<script>
-(function(){
-  "use strict";
+<style>
+  .artifact-id-cell {
+    max-width: 280px;
+    white-space: normal;   
+    word-break: break-all; 
+    overflow-wrap: anywhere;  
+  }
+</style>
 
-  // helper to read data-* attributes safely
-  function getAttr(el, key){
-    return el.getAttribute('data-' + key) || (el.dataset && el.dataset[key]) || null;
+<style>
+  .uploaded-at {
+    font-family: 'Courier New', monospace;
+    font-size: 0.9rem;
+    white-space: nowrap; 
+  }
+</style>
+
+<style>
+  .uploaded-at {
+    font-family: 'Courier New', monospace;
+    font-size: 0.9rem;
+    color: #ccc;
+    white-space: normal; 
+    word-break: break-word;
+    overflow-wrap: anywhere; 
+    max-width: 220px;          
+  }
+</style>
+
+<style>
+  .analysis-list {
+    list-style-type: disc;
+    padding-left: 20px;
+    margin: 0;
+    color: var(--bs-body-color);
+    font-size: 0.9rem;
   }
 
-  // Render the verification result into a target node
-  function renderVerifyResult(aid, container, result){
-    if(!container) return;
-    container.innerHTML = '';
-    if(!result){
-      container.textContent = 'No result';
-      return;
-    }
-
-    // success: metadata_hmac_ok === true and (if available) shas match
-    const okSig = !!result.metadata_hmac_ok;
-    const onDisk = result.on_disk_sha256 || null;
-    const computed = result.computed_sha256 || null;
-
-    if(okSig){
-      const okDiv = document.createElement('div');
-      okDiv.className = 'verify-ok';
-      okDiv.textContent = 'Metadata signature: OK ✓';
-      container.appendChild(okDiv);
-    } else {
-      const err = document.createElement('div');
-      err.className = 'verify-bad';
-      err.textContent = 'Metadata signature: MISMATCH';
-      container.appendChild(err);
-      if(result.metadata_hmac_details){
-        const md = document.createElement('div');
-        md.className = 'small text-muted';
-        md.textContent = 'Details: ' + (typeof result.metadata_hmac_details === 'string' ? result.metadata_hmac_details : JSON.stringify(result.metadata_hmac_details));
-        container.appendChild(md);
-      }
-    }
-
-    if(onDisk || computed){
-      const wrap = document.createElement('div');
-      wrap.className = 'small';
-      wrap.style.marginTop = '6px';
-      if(onDisk) wrap.innerHTML += 'on-disk SHA: <code>' + onDisk + '</code><br/>';
-      if(computed) wrap.innerHTML += 'computed SHA: <code>' + computed + '</code>';
-      container.appendChild(wrap);
-    }
-
-    // show hash mismatch notice if both available and differ
-    if(onDisk && computed){
-      if(onDisk !== computed){
-        const mm = document.createElement('div');
-        mm.style.color = '#c0392b'; mm.style.fontWeight = '600';
-        mm.textContent = 'Hash mismatch — artifact contents differ from recorded SHA';
-        container.appendChild(mm);
-      } else {
-        const mm = document.createElement('div');
-        mm.style.color = '#16a085'; mm.style.fontWeight = '600';
-        mm.textContent = 'Hash match — artifact contents match recorded SHA';
-        container.appendChild(mm);
-      }
-    }
+  .analysis-list li {
+    margin-bottom: 4px;
+    line-height: 1.4;
   }
 
-  // Render CoC rows (simple list)
-  function renderCoCList(container, rows){
-    if(!container) return;
-    container.innerHTML = '';
-    if(!rows || rows.length === 0){
-      container.innerHTML = '<div class="text-muted small">No CoC entries</div>';
-      return;
-    }
-    const ul = document.createElement('ul');
-    rows.forEach(r => {
-      const li = document.createElement('li');
-      const ts = r.ts || r.ts_string || '';
-      const parts = [];
-      if(r.actor) parts.push('actor=' + r.actor);
-      if(r.action) parts.push('action=' + r.action);
-      if(r.location) parts.push('location=' + r.location);
-      if(r.details){
-        let d = r.details;
-        if(typeof d === 'object') d = JSON.stringify(d);
-        parts.push('details=' + d);
-      }
-      li.textContent = (ts ? (ts + ' — ') : '') + parts.join(' • ');
-      ul.appendChild(li);
-    });
-    container.appendChild(ul);
+  .analysis-list .badge {
+    min-width: 60px;
+    font-size: 0.75rem;
+    text-align: center;
+    vertical-align: middle;
   }
 
-  // find or create container for CoC for a button & id
-  function findCoCContainer(btn, aid){
-    try {
-      const row = btn.closest('tr, .artifact-row, .event');
-      if(row){
-        const existing = row.querySelector('.coc-list');
-        if(existing) return existing;
-      }
-    } catch(e){ /* ignore */ }
-
-    const idCandidate = 'coc-list-' + aid;
-    const elById = document.getElementById(idCandidate);
-    if(elById) return elById;
-
-    // fallback: create and append after button
-    const fallback = document.createElement('div');
-    fallback.className = 'mt-2 small coc-list';
-    btn.parentNode && btn.parentNode.appendChild(fallback);
-    return fallback;
+  .analysis-list strong {
+    color: var(--bs-body-color);
   }
 
-  // main: fetch verification endpoint and render
-  async function doVerify(caseId, artId, container){
-    if(!caseId || !artId) return;
-    container = container || document.getElementById('verify-result-' + artId) || (function(){
-      // fallback create after the verify button if missing
-      const selector = '.verify-btn[data-case="'+caseId+'"][data-art="'+artId+'"]';
-      const btn = document.querySelector(selector);
-      if(!btn) return null;
-      const c = document.createElement('div'); c.className = 'mt-2 small'; btn.parentNode && btn.parentNode.appendChild(c);
-      return c;
-    })();
-    if(!container) return;
+  .analysis-list ul {
+    list-style-type: circle;
+    padding-left: 18px;
+    margin-top: 4px;
+    color: var(--bs-secondary-color);
+  }
+</style>
 
-    container.innerHTML = '<span class="text-muted">Verifying…</span>';
-    try {
-      const resp = await fetch('/api/coc/verify/' + encodeURIComponent(caseId) + '/' + encodeURIComponent(artId), { method:'GET', credentials:'same-origin' });
-      if(!resp.ok){
-        const text = await resp.text().catch(()=>String(resp.status));
-        container.innerHTML = '<span style="color:orange">verify failed: ' + (text||resp.status) + '</span>';
-        console.warn('verify failed', resp.status, text);
-        return;
-      }
-      const json = await resp.json();
-      renderVerifyResult(artId, container, json);
-    } catch(err){
-      console.error('verify error', err);
-      container.innerHTML = '<span style="color:orange">Verification failed</span>';
+<style>
+  .action-cell {
+    min-width: 180px;
+    text-align: center;
+    vertical-align: top;
+  }
+
+  .action-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .btn-action {
+    width: 100%;
+    border-radius: 10px;
+    border: 1px solid transparent;
+    font-weight: 500;
+    transition: all 0.2s ease-in-out;
+    background-color: var(--bs-body-bg);
+    color: var(--bs-body-color);
+    box-shadow: 0 0 4px rgba(0,0,0,0.1);
+  }
+
+  .btn-ioc {
+    border-color: rgba(13,110,253,0.4);
+    color: var(--bs-info);
+  }
+  .btn-yara {
+    border-color: rgba(220,53,69,0.4);
+    color: var(--bs-danger);
+  }
+
+  .btn-verify {
+    border-color: rgba(25,135,84,0.5);
+    color: var(--bs-success);
+  }
+  .btn-coc {
+    border-color: rgba(108,117,125,0.4);
+    color: var(--bs-secondary);
+  }
+
+  .btn-action:hover, .btn-action:focus {
+    background-color: var(--bs-tertiary-bg);
+    box-shadow: 0 0 8px rgba(13,110,253,0.3);
+    transform: translateY(-1px);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .btn-action:hover, .btn-action:focus {
+      box-shadow: 0 0 8px rgba(255,255,255,0.1);
     }
   }
+</style>
 
-  // fetch CoC list and render
-  async function loadCoC(caseId, artId, container){
-    if(!caseId || !artId) return;
-    container = container || document.getElementById('coc-list-' + artId) || (function(){
-      // fallback: try to find coc-list in same row
-      const selector = '.coc-btn[data-case="'+caseId+'"][data-art="'+artId+'"]';
-      const btn = document.querySelector(selector);
-      if(!btn) return null;
-      return findCoCContainer(btn, artId);
-    })();
-    if(!container) return;
-    container.innerHTML = '<span class="text-muted">Loading CoC…</span>';
-    try {
-      const resp = await fetch('/api/coc/' + encodeURIComponent(caseId) + '/' + encodeURIComponent(artId), { method:'GET', credentials:'same-origin' });
-      if(!resp.ok){
-        const text = await resp.text().catch(()=>String(resp.status));
-        container.innerHTML = '<span style="color:orange">failed to load CoC</span>';
-        console.warn('CoC load failed', resp.status, text);
-        return;
-      }
-      const rows = await resp.json();
-      renderCoCList(container, rows);
-    } catch(err){
-      console.error('CoC fetch error', err);
-      container.innerHTML = '<span style="color:orange">failed to load CoC</span>';
-    }
-  }
+<style>
+.verify-inline-status {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.85rem;
+  transition: opacity 0.8s ease;
+}
+</style>
 
-  // idempotent binding for verify and coc buttons under a root node
-  function attachHandlers(root){
-    root = root || document;
-    // verify buttons
-    root.querySelectorAll('.verify-btn').forEach(btn => {
-      if(btn.getAttribute('data-verify-bound') === '1') return;
-      btn.setAttribute('data-verify-bound','1');
-      btn.addEventListener('click', function(ev){
-        try { ev.preventDefault(); ev.stopPropagation(); } catch(_) {}
-        const caseId = getAttr(btn, 'case');
-        const artId = getAttr(btn, 'art');
-        if(!caseId || !artId){
-          console.warn('verify button missing data-case/data-art', btn);
-          return;
-        }
+<style>
+.coc-list-group {
+  overflow-y: auto;
+  border-radius: 10px;
+}
 
-        // find existing result container or create one
-        let resultEl = document.getElementById('verify-result-' + artId);
-        if(!resultEl){
-          const row = btn.closest('tr, .artifact-row, .event');
-          resultEl = row ? row.querySelector('#verify-result-' + artId) : null;
-        }
-        if(!resultEl){
-          resultEl = document.createElement('div');
-          resultEl.className = 'mt-2 small';
-          btn.parentNode && btn.parentNode.appendChild(resultEl);
-        }
+.coc-list-group .list-group-item {
+  background-color: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.08);
+  margin-bottom: 10px;
+  border-left: 6px solid transparent;
+  border-radius: 10px;
+  padding: 12px 16px;
+  color: #f1f1f1;
+  transition: all 0.2s ease-in-out;
+}
 
-        doVerify(caseId, artId, resultEl);
-      });
-    });
+.coc-list-group .list-group-item strong {
+  color: #fff;
+  font-weight: 600;
+}
 
-    // coc buttons
-    root.querySelectorAll('.coc-btn').forEach(btn => {
-      if(btn.getAttribute('data-coc-bound') === '1') return;
-      btn.setAttribute('data-coc-bound','1');
-      btn.addEventListener('click', function(ev){
-        try { ev.preventDefault(); ev.stopPropagation(); } catch(_) {}
-        const caseId = getAttr(btn, 'case');
-        const artId = getAttr(btn, 'art');
-        if(!caseId || !artId){
-          console.warn('coc button missing data-case/data-art', btn);
-          return;
-        }
-        const container = findCoCContainer(btn, artId);
-        loadCoC(caseId, artId, container);
-      });
-    });
-  }
+.coc-list-group .list-group-item:hover {
+  background-color: rgba(255,255,255,0.08);
+  transform: translateY(-2px);
+}
 
-  // bootstrap on DOM ready
-  document.addEventListener('DOMContentLoaded', function(){
-    attachHandlers(document);
-    setTimeout(function(){ attachHandlers(document); }, 200);
-  });
+.coc-action-upload { border-left-color: #4da3ff; }   /* light blue */
+.coc-action-verify { border-left-color: #4cffb0; }   /* mint green */
+.coc-action-tamper { border-left-color: #ff6b6b; }   /* red */
+.coc-action-extract { border-left-color: #ffb84d; }  /* orange */
+.coc-action-generic { border-left-color: #a0a0a0; }  /* grey */
 
-  // observe DOM to attach to newly added buttons
-  const mo = new MutationObserver(function(muts){
-    // attach handlers to the whole document or the changed nodes
-    attachHandlers(document);
-  });
-  mo.observe(document.body, { childList: true, subtree: true });
+.coc-list-group code {
+  color: #00ffcc;
+  background: rgba(0,255,204,0.1);
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-family: "Courier New", monospace;
+  font-size: 0.85rem;
+}
 
-  // expose small debug helpers
-  window.TriageHelpers = window.TriageHelpers || {};
-  window.TriageHelpers.verify = doVerify;
-  window.TriageHelpers.loadCoC = loadCoC;
-})();
-</script>
+.coc-icon {
+  font-size: 1.2rem;
+  margin-right: 6px;
+}
 
-<!-- Chart.js (ensure this is included once; remove duplicates) -->
+.coc-header {
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.coc-subtext {
+  color: #bbb;
+  font-size: 0.85rem;
+}
+</style>
+
+<style>
+.timeline {
+  border-left: 2px solid var(--bs-secondary);
+  margin-left: 1rem;
+  padding-left: 1rem;
+}
+.timeline-entry {
+  position: relative;
+}
+.timeline-entry::before {
+  content: '';
+  position: absolute;
+  left: -1.1rem;
+  top: 0.6rem;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: var(--bs-primary);
+}
+.timeline-entry:hover {
+  background-color: rgba(255,255,255,0.05);
+}
+</style>
+
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
 <script>
 document.addEventListener('DOMContentLoaded', function(){
 
-  // ---- Put the template-inserted JSON in one place (avoid redeclare issues) ----
-  // Use a single global constant so Jinja expansion occurs once and linters won't
-  // complain about duplicate block-scoped declarations.
 const TRIAGE_ARTIFACTS = {{ artifacts | tojson | safe }};
 
-  // ---- helpers -----------------------------------------------------------
   function safeParseAnalysis(a){
     if(!a) return {};
     if(typeof a === 'string'){
@@ -621,7 +636,6 @@ const TRIAGE_ARTIFACTS = {{ artifacts | tojson | safe }};
     return name.slice(0, maxLen-2) + '…';
   }
 
-  // ---- Inline final-score chart (small, inside suspicion card) ----------
   (function renderInlineScoreChart(){
     const el = document.getElementById('inlineScoreChart');
     if(!el) return;
@@ -804,7 +818,6 @@ const TRIAGE_ARTIFACTS = {{ artifacts | tojson | safe }};
       }
     });
 
-    // Debug: table in console
     try {
       const debugRows = labels.map((lab,i)=>({
         artifact: lab,
@@ -908,6 +921,239 @@ const TRIAGE_ARTIFACTS = {{ artifacts | tojson | safe }};
   })();
 
 });
+</script>
+
+<script>
+(function(){
+  "use strict";
+
+  const fadeDelay = 5000; // 5 seconds
+
+  // helper for data- attributes
+  const getAttr = (el, key) => el.dataset[key] || el.getAttribute("data-" + key) || null;
+
+  // --- Inline Verify Renderer ---
+  function showVerifyStatus(btn, result){
+    let msg = "";
+    let icon = "";
+    let color = "";
+
+    const okSig = !!result.metadata_hmac_ok;
+    const onDisk = result.on_disk_sha256 || "";
+    const computed = result.computed_sha256 || "";
+
+    const hashMatch = (onDisk && computed && onDisk === computed);
+
+    if(okSig && hashMatch){
+      icon = "✅";
+      msg = "Verified successfully — hash match OK";
+      color = "#00ff88";
+    } else if(okSig && !hashMatch){
+      icon = "⚠️";
+      msg = "Verified but hash mismatch";
+      color = "#ffb74d";
+    } else if(!okSig){
+      icon = "❌";
+      msg = "Metadata tampered — signature invalid";
+      color = "#ff6b6b";
+    } else {
+      icon = "ℹ️";
+      msg = "Verification incomplete";
+      color = "#ccc";
+    }
+
+    let statusEl = btn.parentNode.querySelector(".verify-inline-status");
+    if(!statusEl){
+      statusEl = document.createElement("div");
+      statusEl.className = "verify-inline-status small mt-1";
+      btn.parentNode.appendChild(statusEl);
+    }
+
+    statusEl.style.color = color;
+    statusEl.style.fontWeight = "600";
+    statusEl.innerHTML = `${icon} ${msg}`;
+
+    // fade out after 5s
+    setTimeout(() => {
+      statusEl.style.transition = "opacity 0.8s ease";
+      statusEl.style.opacity = "0";
+      setTimeout(()=>statusEl.remove(),800);
+    }, fadeDelay);
+  }
+
+  // --- CoC Renderer (Modal) ---
+function renderCoC(container, rows){
+  if(!rows || !rows.length){
+    container.innerHTML = "<div class='text-muted small'>No chain of custody records.</div>";
+    return;
+  }
+
+  // Sort newest → oldest
+  rows.sort((a,b) => new Date(b.ts) - new Date(a.ts));
+
+  let html = "<ul class='list-group coc-list-group'>";
+  for(const r of rows){
+    const ts = new Date(r.ts).toLocaleString("en-GB", {
+      day:"2-digit", month:"short", year:"numeric",
+      hour:"2-digit", minute:"2-digit", second:"2-digit",
+      hour12:true, timeZone:"Asia/Kolkata"
+    }).replace(",", "");
+
+    const action = r.action || "—";
+    const actor = r.actor || "unknown";
+    const loc = r.location || "—";
+
+let icon = "ℹ️", actionClass = "coc-action-generic";
+
+if (action.includes("tamper")) { 
+  icon = "❌"; 
+  actionClass = "coc-action-tamper"; 
+}
+else if (action.includes("mismatch")) { 
+  icon = "⚠️"; 
+  actionClass = "coc-action-warning"; 
+}
+else if (action.includes("verify")) { 
+  icon = "🟢"; 
+  actionClass = "coc-action-verify"; 
+}
+else if (action.includes("upload")) { 
+  icon = "📤"; 
+  actionClass = "coc-action-upload"; 
+}
+else if (action.includes("extract")) { 
+  icon = "🧩"; 
+  actionClass = "coc-action-extract"; 
+}
+
+    html += `<li class="list-group-item ${actionClass}">`;
+    html += `<div><strong>${icon} [${action}]</strong> ${actor} at <em>${loc}</em> — ${ts}</div>`;
+
+    if(r.details && typeof r.details === "object"){
+      const d = r.details;
+      const hasExpected = d.expected || d.observed;
+
+      html += `<div class="small ms-3 mt-1">`;
+      if (hasExpected) {
+  const exp = d.expected || "";
+  const obs = d.observed || "";
+  const match = (exp && obs && exp === obs);
+
+let vstatus = "";
+
+// --- Prioritized verification status logic ---
+if (r.action.includes("tamper") || d.tampered === true || d.hmac_ok === false) {
+  vstatus = "❌ Metadata tampered — signature invalid";
+}
+else if (r.action.includes("mismatch")) {
+  vstatus = "⚠️ Hash mismatch — artifact content may differ";
+}
+else if (r.action.includes("corrupt")) {
+  vstatus = "💥 Metadata JSON corrupt — cannot verify signature";
+}
+else if (exp && obs) {
+  if (exp === obs) {
+    vstatus = "✅ Verification successful — hash match confirmed";
+  } else {
+    vstatus = "⚠️ Hash mismatch — artifact content may differ";
+  }
+}
+else if (!exp && !obs && d.hmac_ok) {
+  vstatus = "ℹ️ No file hash available — metadata verified only";
+}
+else {
+  vstatus = "ℹ️ Verification incomplete or unknown";
+}
+
+
+  html += `
+    <div>${vstatus}</div>
+    <div>Expected SHA256: <code>${exp || "—"}</code></div>
+    <div>Observed SHA256: <code>${obs || "—"}</code></div>
+    <div>Match: ${match ? "✅ true" : "❌ false"}</div>
+  `;
+} else {
+  // Handle explicit tampering without hashes
+  if (d.tampered || r.action.includes("tamper") || d.hmac_ok === false) {
+    html += `<div class="text-danger">❌ Metadata tampered — signature invalid</div>`;
+  } else {
+    for (const [k,v] of Object.entries(d)) {
+      html += `<div>${k}: <code>${String(v)}</code></div>`;
+    }
+  }
+}
+
+      html += `</div>`;
+    }
+
+    html += `</li>`;
+  }
+
+  html += "</ul>";
+  container.innerHTML = html;
+}
+
+  // --- Fetch helpers ---
+async function fetchVerify(caseId, artId, btn){
+  try {
+    const resp = await fetch(`/api/coc/verify/${caseId}/${artId}`);
+    const data = await resp.json().catch(()=>({}));
+
+    if (!resp.ok) {
+      console.warn("Verify failed:", resp.status, data);
+      showVerifyStatus(btn, { metadata_hmac_ok:false, _server_msg:data.error || "Verification failed" });
+      return;
+    }
+
+    showVerifyStatus(btn, data);
+  } catch (err) {
+    console.error("verify error", err);
+    showVerifyStatus(btn, { metadata_hmac_ok:false });
+  }
+}
+
+  async function fetchCoC(caseId, artId){
+    try {
+      const resp = await fetch(`/api/coc/${caseId}/${artId}`);
+      const data = await resp.json();
+      const body = document.getElementById("cocModalBody");
+      renderCoC(body, data);
+      new bootstrap.Modal(document.getElementById("cocModal")).show();
+    } catch (err){
+      document.getElementById("cocModalBody").innerHTML = "<div class='text-danger'>Failed to load CoC</div>";
+      new bootstrap.Modal(document.getElementById("cocModal")).show();
+    }
+  }
+
+  // --- Bind buttons ---
+  document.addEventListener("DOMContentLoaded", ()=>{
+    document.querySelectorAll(".verify-btn").forEach(btn=>{
+  if (btn.dataset.verifyBound === "1") return;  // prevent rebinding
+  btn.dataset.verifyBound = "1";
+
+  btn.addEventListener("click", async ()=>{
+    try {
+      btn.disabled = true;
+      btn.classList.add('disabled');
+      btn.textContent = 'Verifying…';
+      await fetchVerify(btn.dataset.case, btn.dataset.art, btn);
+    } finally {
+      setTimeout(()=>{ 
+        btn.disabled=false; 
+        btn.classList.remove('disabled');
+        btn.textContent = '✅ Verify';
+      }, 900);
+    }
+  });
+});
+
+    document.querySelectorAll(".coc-btn").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        fetchCoC(btn.dataset.case, btn.dataset.art);
+      });
+    });
+  });
+})();
 </script>
 
 {% endblock %}

@@ -1,15 +1,11 @@
 # modules/yara.py
-"""
-YARA integration for Cyber Triage Tool.
-"""
 import os
 import json
 import logging
 import shutil
 
-# Try to import yara; if not available we fall back gracefully
 try:
-    import yara  # noqa: F401
+    import yara
     YARA_AVAILABLE = True
 except Exception:
     yara = None
@@ -81,10 +77,6 @@ def compile_rules(rules_path="data/yara_rules.yar"):
 
 
 def _find_saved_file(case_id, artifact_id):
-    """
-    Locate the actual file corresponding to this artifact ID.
-    Supports files extracted from ZIP archives (uploads/zip_*).
-    """
     _, artifacts_dir = ensure_case_dirs(case_id)
 
     # Try metadata first
@@ -273,9 +265,6 @@ def scan_artifact(case_id, artifact_id, rules_path="data/yara_rules.yar"):
     return result
 
 def scan_file_with_yara(file_path):
-    """
-    Simple wrapper to scan a standalone file (used by analysis.py)
-    """
     try:
         compiled = compile_rules()
         if not compiled:

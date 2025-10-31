@@ -1,3 +1,5 @@
+# modules/ioc.py
+
 import os
 import json
 import re
@@ -12,15 +14,9 @@ from modules.models import Artifact
 logger = logging.getLogger(__name__)
 
 IOC_PATH_DEFAULT = os.path.join("data", "ioc.json")
-
-# Small cache so load_iocs isn't re-reading file repeatedly during a run.
 _ioc_cache = {"path": None, "mtime": None, "data": None}
-
 _IP_RE = re.compile(rb"(?:\d{1,3}\.){3}\d{1,3}")
 
-# -----------------------
-# Helpers
-# -----------------------
 def _value_of(item):
     """Return string value whether item is plain string or object with 'value' key."""
     if item is None:
@@ -66,7 +62,6 @@ def _normalize_domain_repr(d: str) -> str:
     if not d:
         return ""
     s = str(d).strip()
-    # handle [.] (and some other obfuscations)
     s = s.replace("[.]", ".").replace("(.)", ".").replace("[dot]", ".")
     s = s.replace(" . ", ".")
     return s.lower()
@@ -110,9 +105,6 @@ def _normalize_filename(name: str) -> str:
         return ""
     return os.path.basename(name).strip().lower()
 
-# -----------------------
-# Loader
-# -----------------------
 def load_iocs(ioc_path=IOC_PATH_DEFAULT, force_reload: bool = False) -> Dict[str, Any]:
     """
     Load IOC file and normalize into a dictionary of useful sets/lists.
@@ -220,9 +212,6 @@ def load_iocs(ioc_path=IOC_PATH_DEFAULT, force_reload: bool = False) -> Dict[str
     _ioc_cache.update({"path": ioc_path, "mtime": mtime, "data": data})
     return data
 
-# -----------------------
-# IOC checking for a single artifact
-# -----------------------
 def _find_saved_file_if_missing(meta, case_id, artifact_id):
     """
     Try to locate the saved artifact file.
@@ -290,15 +279,6 @@ def _search_upload_manifest_for_artifact(case_id: str, artifact_id: str) -> Opti
 
 
 def _find_artifact_meta_by_id(case_id: str, artifact_id: str) -> Optional[str]:
-    """
-    Robust search for artifact metadata JSON.
-    Tries (in order):
-      1) canonical metadata file: <artifacts_dir>/<artifact_id>.json
-      2) canonical 'extracted__<artifact_id>.json' in artifacts dir
-      3) recursively scan all .json files under artifacts dir for content mentioning artifact_id
-      4) filename-based search for json files containing artifact_id
-    Returns absolute path to the metadata JSON (first match) or None.
-    """
     artifacts_dir = os.path.join(BASE_EVIDENCE_DIR, case_id, "artifacts")
     # 1) canonical path
     possible = os.path.join(artifacts_dir, f"{artifact_id}.json")
@@ -343,10 +323,6 @@ def _find_artifact_meta_by_id(case_id: str, artifact_id: str) -> Optional[str]:
     return None
 
 def normalize_extracted_metadata(case_id: str) -> int:
-    """
-    Move/rename extracted__*.json metadata into canonical <artifact_id>.json files
-    in evidence/<case_id>/artifacts. Returns number of files normalized.
-    """
     artifacts_dir = os.path.join(BASE_EVIDENCE_DIR, case_id, "artifacts")
     if not os.path.isdir(artifacts_dir):
         return 0
@@ -391,9 +367,6 @@ def normalize_extracted_metadata(case_id: str) -> int:
     return normalized
 
 def check_iocs_for_artifact(case_id, artifact_id, ioc_path=IOC_PATH_DEFAULT):
-    """
-    Run IOC checks for a single artifact.
-    """
     matches = []
 
     # ensure artifact_meta_path is always defined
@@ -694,10 +667,6 @@ def check_iocs_for_artifact(case_id, artifact_id, ioc_path=IOC_PATH_DEFAULT):
 
 
 def scan_file_for_iocs(file_path):
-    """
-    Lightweight IOC scan used when case_id/artifact_id are not available.
-    Scans file contents for simple IOC patterns (IPs, URLs, emails).
-    """
     matches = []
     try:
         with open(file_path, "rb") as f:

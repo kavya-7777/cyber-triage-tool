@@ -9,10 +9,6 @@
 import "pe"
 import "hash"
 
-/////////////////////////////////////////////////////////////////////////
-// Demo / handcrafted rules (with meta.severity)
-/////////////////////////////////////////////////////////////////////////
-
 rule CT_Ransomware_Generic
 {
   meta:
@@ -87,12 +83,6 @@ rule CT_Sample_SHA256_ASCII
     any of them
 }
 
-/////////////////////////////////////////////////////////////////////////
-// Auto-generated IOC rules (based on data/ioc.json) with meta.severity
-// These are conservative (ASCII/text) matches for safe demo operation.
-// If you want exact file-hash matching, enable the commented hash rules below
-/////////////////////////////////////////////////////////////////////////
-
 rule CT_IOC_Filenames
 {
   meta:
@@ -135,10 +125,6 @@ rule CT_IOC_hash_00979047
     $h
 }
 
-/*
-If you want exact SHA256 file matching and your YARA build supports the 'hash' module,
-you can add a rule like below (commented out for portability):
-
 rule CT_IOC_hash_exact_00979047
 {
   meta:
@@ -149,7 +135,6 @@ rule CT_IOC_hash_exact_00979047
   condition:
     hash.sha256(0, filesize) == "00979047eff88ef31a3279dc91bc28f2bbf9ff7f4672a98916b08f06da88ca7a"
 }
-*/
 
 rule CT_IOC_hash_59b924ce
 {
@@ -176,10 +161,6 @@ rule CT_IOC_hash_e3b0c442
   condition:
     $h
 }
-
-/////////////////////////////////////////////////////////////////////////
-// End of rules
-/////////////////////////////////////////////////////////////////////////
 
 rule Fake_Test_Rule
 {

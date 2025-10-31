@@ -1,11 +1,4 @@
 # scripts/check_case_sync.py
-"""
-Check synchronization between DB, manifest, events, and artifact files for a case.
-Usage:
-  python scripts/check_case_sync.py <case_id>
-Example:
-  python scripts/check_case_sync.py case001
-"""
 import os, sys, json, sqlite3, traceback
 
 def load_manifest_count(case):
@@ -104,7 +97,6 @@ def main():
             print("   ", mf)
     print()
 
-    # Quick heuristic
     vals = {}
     vals["db_count"] = db_count if isinstance(db_count, int) else None
     vals["manifest_count"] = man_count if isinstance(man_count, int) else None

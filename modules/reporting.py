@@ -48,7 +48,6 @@ def _collect_case_files(case_id: str) -> Dict:
     base["processes_path"] = processes
     base["events_path"] = events
 
-    # --- PATCH START: recursive artifact collector ---
     artifacts = []
 
     def collect_artifacts_recursive(folder):
@@ -82,7 +81,6 @@ def _collect_case_files(case_id: str) -> Dict:
         collect_artifacts_recursive(evidence_artifacts_dir)
 
     base["artifacts"] = artifacts
-    # --- PATCH END ---
     return base
 
 def register_reporting_routes(app):
@@ -115,7 +113,7 @@ def register_reporting_routes(app):
 
     # Try importing Playwright; set to None if unavailable
     try:
-        from playwright.sync_api import sync_playwright  # type: ignore
+        from playwright.sync_api import sync_playwright
     except Exception:
         sync_playwright = None
 
@@ -261,5 +259,4 @@ def register_reporting_routes(app):
             download_name=f"{cid}_report_bundle.zip"
         )
 
-    # register blueprint
     app.register_blueprint(bp)

@@ -18,26 +18,45 @@ from modules.utils import (
     atomic_write_json
 )
 
-
 import tempfile
 
 from modules.models import ChainOfCustody
 app = Flask(__name__)
 
+def ist_time(value, fmt='%d-%b-%Y %I:%M %p IST'):
+    """
+    Converts UTC or ISO string datetime to IST and returns formatted string.
+    Works for both datetime objects and ISO8601 strings.
+    Example: '31-Oct-2025 01:48 PM IST'
+    """
+    if not value:
+        return "—"
 
-def ist_time(value, fmt='%Y-%m-%d %H:%M:%S'):
-    """
-    Converts a datetime object to IST and returns formatted string.
-    If value is already a string, returns it as-is.
-    """
+    # Case 1: already a datetime
     if isinstance(value, datetime):
         ist = value + timedelta(hours=5, minutes=30)
         return ist.strftime(fmt)
-    return value
+
+    # Case 2: string (try parsing common formats)
+    if isinstance(value, str):
+        try:
+            # Handles both '2025-10-31T08:18:09.850230Z' and '2025-10-31 08:18:09'
+            value = value.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(value)
+        except Exception:
+            try:
+                dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return value  # fallback: return as-is if unparseable
+
+        ist = dt + timedelta(hours=5, minutes=30)
+        return ist.strftime(fmt)
+
+    # Fallback for anything else
+    return str(value)
 
 # Register the filter with Jinja2
 app.jinja_env.filters['ist_time'] = ist_time
-
 
 def _heuristics_stub(path, *args, **kwargs):
     return {"suspicion_score": None, "reasons": [], "component_scores": {}}
@@ -46,7 +65,6 @@ try:
     from heuristics import analyze_file
 except Exception:
     analyze_file = _heuristics_stub
-
 
 # utils for file saves (keeps existing behavior)
 from modules.utils import save_uploaded_file, iso_time_now, add_coc_entry
@@ -62,17 +80,11 @@ import shutil
 # DB
 from modules.db import db
 app.config["UPLOAD_FOLDER"] = "evidence"
-# ---------------------------
-# App config: upload limits, allowed extensions & logging
-# ---------------------------
-# Max upload size: 100 MB (adjust as needed). This prevents huge uploads in demo.
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB
 
 # Allowed extensions (None = allow all). Example: {'exe','dll','txt','log'}
 ALLOWED_EXTENSIONS = None  # change to a set like {'exe','txt'} to restrict
 
-
-# (optional) configure input file locations if not default
 app.config['TIMELINE_PROCESSES_PATH'] = 'data/processes.csv'
 app.config['TIMELINE_EVENTS_PATH'] = 'data/events.json'
 
@@ -81,11 +93,6 @@ import logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("cyber-triage")
 
-
-# ---------------------------
-# Robust DB path setup
-# ---------------------------
-# Use an absolute path for the SQLite file so the DB is always created under the project data/ folder.
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -119,14 +126,9 @@ def safe_case_id(case_id):
         raise ValueError("Invalid case_id")
     return case_id
 
-
-# -------------------------
-# Manifest helpers (keeps existing JSON manifest side-by-side)
-# -------------------------
 def manifest_path_for_case(case_id):
     case_dir = os.path.join(app.config["UPLOAD_FOLDER"], case_id)
     return os.path.join(case_dir, "manifest.json")
-
 
 def load_manifest(case_id):
     manifest_p = manifest_path_for_case(case_id)
@@ -158,7 +160,6 @@ def load_manifest(case_id):
         "artifacts": []
     }
 
-
 def save_manifest(case_id, manifest):
     """
     Atomically write and sign manifest.json for a case to avoid partial-write races.
@@ -178,7 +179,6 @@ def save_manifest(case_id, manifest):
             pass
         raise
 
-
 def add_artifact_to_manifest(case_id, artifact_metadata):
     manifest = load_manifest(case_id)
     summary = {
@@ -195,7 +195,6 @@ def add_artifact_to_manifest(case_id, artifact_metadata):
     save_manifest(case_id, manifest)
     return manifest
 
-
 # -------------------------
 # Routes
 # -------------------------
@@ -205,18 +204,6 @@ def home():
 
 @app.route("/upload", methods=["GET", "POST"])
 def upload_file():
-    """
-    Save file to disk (modules.utils.save_uploaded_file), compute SHA-256,
-    update manifest, and create/update DB records.
-    Auto-runs IOC and YARA checks (if available) and refreshes response metadata.
-
-    NEW: If the uploaded file is a ZIP archive, extract it and process every file inside:
-    - extract to evidence/<case_id>/artifacts/uploads/zip_<stamp>/
-    - for each extracted file: compute sha, run heuristics, IOC/YARA, compute final score
-    - persist per-file artifact JSON and DB rows (re-using existing helpers)
-    - generate case-level processes.csv and events.json (via generate_case_processes_and_events)
-    - build timeline and return per-file scores + timeline preview
-    """
     if request.method == "GET":
         return render_template("upload.html")
 
@@ -251,9 +238,6 @@ def upload_file():
         logger.exception("Failed to update manifest after upload — continuing without manifest")
         # manifest stays as {} so later code can safely inspect it
 
-    # -----------------------
-    # Deduplication & immediate integrity handling (NEW)
-    # -----------------------
     try:
         # compute sha256 (best-effort) right after save so we can dedupe before DB row creation
         saved_path = metadata.get("saved_path")
@@ -514,6 +498,7 @@ def upload_file():
 
                     # 3) if still not found, create a new artifact id/meta (fallback)
                     if not artifact_meta:
+                        artifact_meta["uploaded_by"] = current_user.username if current_user else "Uploader"
                         artifact_id = f"extracted__{uuid.uuid4().hex}"
                         artifact_meta = {
                             "artifact_id": artifact_id,
@@ -524,8 +509,6 @@ def upload_file():
                             "uploaded_at": iso_time_now(),
                             "size_bytes": os.path.getsize(path),
                         }
-                    # ---- PATCH END ----
-                                            # --- Ensure unique artifact_id for each extracted file ---
                     try:
                         # If artifact_id already exists in DB for this case, generate a new unique id.
                         # Also track ids we've created during this upload so we don't reuse them.
@@ -567,8 +550,6 @@ def upload_file():
                         logger.debug("No pre-existing metadata found; created new artifact %s for %s", artifact_id, path)
 
 
-                    # --- Ensure the artifact_meta keeps the correct filename/path for this extracted item ---
-                    # prefer the relative path inside the unpack dir for display (relpath computed earlier)
                     try:
                         artifact_meta["original_filename"] = relpath
                         artifact_meta["saved_filename"] = basename
@@ -589,9 +570,6 @@ def upload_file():
                     # helpful debug log to confirm what will be written to DB/manifest
                     logger.info("Saving extracted artifact: %s (original=%s saved=%s)", artifact_meta.get("artifact_id"), artifact_meta.get("original_filename"), artifact_meta.get("saved_filename"))
 
-
-
-                    # ===== SAFE: create or update DB record for this extracted file =====
                     try:
                         # ensure the case row exists
                         case_row = Case.query.filter_by(case_id=case_id).first()
@@ -712,7 +690,7 @@ def upload_file():
                         "heuristic_score": heuristic_score
                     })
                     
-                    # ---- REPLACEMENT: ensure final_score and reasons saved for extracted artifact ----
+                    # ---- ensure final_score and reasons saved for extracted artifact ----
                     try:
                         from modules.scoring import compute_final_score
 
@@ -799,8 +777,6 @@ def upload_file():
 
                     except Exception:
                         logger.exception("Scoring/persistence step failed for extracted artifact %s", artifact_meta.get("artifact_id"))
-                    # ---- END REPLACEMENT ----
-
 
                     # persist artifact JSON next to file (signed & atomic, merge safely)
                     try:
@@ -844,7 +820,7 @@ def upload_file():
                         "yara_matches": yara_matches
                     })
 
-                    # --- NEW PATCH: add Chain of Custody and upload event for extracted files ---
+                    # --- add Chain of Custody and upload event for extracted files ---
                     try:
                         from modules.utils import add_coc_entry
                         add_coc_entry(
@@ -860,7 +836,7 @@ def upload_file():
                     except Exception:
                         logger.exception("Failed to create CoC entry for extracted artifact %s", artifact_meta.get("artifact_id"))
 
-                        # --- NEW: Compute score for extracted artifacts ---
+                        # --- Compute score for extracted artifacts ---
                         from modules import scoring, ioc, yara_rules, heuristics
 
                         try:
@@ -906,7 +882,6 @@ def upload_file():
                                     logger.exception("Failed writing score metadata for %s", artifact_id)
                         except Exception:
                             logger.exception("Failed to compute score for extracted artifact %s", artifact_id)
-                        # --- END PATCH ---
 
                     # --- publish a per-file event into data/<case_id>/events.json (non-destructive) ---
                     try:
@@ -965,8 +940,6 @@ def upload_file():
             except Exception:
                 logger.exception("Failed creating case-level processes/events from extracted files")
 
-
-
             try:
                 if callable(build_timeline):
                     timeline = build_timeline(processes_path, events_path, keep_na=True)
@@ -1008,7 +981,6 @@ def upload_file():
         # If anything unexpected happens in ZIP branch detection/processing, log and continue to single-file flow
         logger.exception("Unexpected error during ZIP handling; falling back to single-file processing")
 
-    
     # 3) Write into DB: create Case if missing, then Artifact row
     try:
         case = Case.query.filter_by(case_id=case_id).first()
@@ -1050,7 +1022,7 @@ def upload_file():
         sha256_hex, _ = compute_sha256(metadata["saved_path"])
         update_artifact_hash(case_id, metadata["artifact_id"], sha256_hex)
 
-        # --- NEW: record CoC entry for upload action (skip extracted ZIP files) ---
+        # --- record CoC entry for upload action (skip extracted ZIP files) ---
         try:
             from modules.utils import add_coc_entry
             artifact_id = metadata.get("artifact_id", "")
@@ -1068,7 +1040,6 @@ def upload_file():
         except Exception:
             logger.exception("Failed to create CoC entry for upload %s/%s", case_id, metadata.get("artifact_id"))
 
-
         # add sha256 to the metadata that we return to the client
         metadata["sha256"] = sha256_hex
 
@@ -1085,7 +1056,6 @@ def upload_file():
         except ImportError:
             # safety: if module import is somehow missing
             logger.info("IOC module not present; skipping auto IOC check")
-        # --- end AUTO IOC CHECK ---
 
         # --- AUTO YARA SCAN (run after hash & IOC) ---
         try:
@@ -1102,7 +1072,6 @@ def upload_file():
                 logger.exception("Auto YARA scan failed for %s/%s", case_id, metadata.get("artifact_id"))
         except ImportError:
             logger.info("YARA module not present; skipping auto YARA scan")
-        # --- end AUTO YARA ---
 
         # --- AUTO HEURISTICS ANALYSIS (new) ---
         try:
@@ -1164,8 +1133,6 @@ def upload_file():
         except ImportError:
             # If import at top fails (shouldn't because you imported), log and continue
             logger.info("Heuristics module not present; skipping heuristics analysis")
-        # --- end AUTO HEURISTICS ---
-
 
         # --- Update manifest.json with heuristics (new) ---
         try:
@@ -1183,7 +1150,6 @@ def upload_file():
             save_manifest(case_id, m)
         except Exception:
             logger.exception("Failed to update manifest.json with heuristics for %s", metadata.get("artifact_id"))
-        # --- end manifest update ---
 
         # --- Compute final suspicion score combining IOC/YARA/HEURISTICS ---
         try:
@@ -1217,14 +1183,12 @@ def upload_file():
             except Exception:
                 logger.exception("Failed to persist final score to DB for %s", metadata.get("artifact_id"))
 
-            # Also update artifact JSON file (atomic write)
             # Also update artifact JSON file (signed preferred, atomic fallback)
             try:
                 meta_path = os.path.join(os.path.dirname(metadata["saved_path"]), f"{metadata['artifact_id']}.json")
 
                 on_disk_meta = mutils.load_signed_metadata_safe(meta_path)
                 on_disk_meta = mutils.normalize_metadata_dict(on_disk_meta)
-
 
                 # merge final analysis keys
                 on_disk_meta.setdefault("analysis", {})
@@ -1260,8 +1224,6 @@ def upload_file():
 
         except Exception:
             logger.exception("Failed to compute/persist final suspicion score for %s", metadata.get("artifact_id"))
-        # --- end final score ---
-
 
         # After running IOC and YARA (which update JSON/DB), refresh analysis from DB or file
         try:
@@ -1377,7 +1339,6 @@ def upload_file():
 
     except Exception:
         logger.exception("Timeline auto-generation failed for single upload")
-
     
     # Return both metadata and DB id for convenience
     return jsonify({
@@ -1386,7 +1347,6 @@ def upload_file():
         "db_artifact_id": getattr(artifact, "id", None) if 'artifact' in locals() else None,
         "manifest_summary_count": manifest_count
     })
-
     return render_template("upload.html")
 
 @app.route("/api/upload_timeline", methods=["POST"])
@@ -1396,13 +1356,8 @@ def api_upload_timeline():
         "message": "The /api/upload_timeline endpoint is deprecated. Please upload a single file or a case ZIP to /upload which now handles both single-file and ZIP ingestion and will generate timelines automatically."
     }), 410
 
-
 @app.route("/dashboard")
 def dashboard():
-    """
-    Dashboard: show case-level info (from DB) and artifacts list.
-    Accepts optional ?case_id= parameter.
-    """
     case_id = request.args.get("case_id", "case001")
 
     # load list of all cases for the case switcher
@@ -1417,7 +1372,7 @@ def dashboard():
     if case:
         artifact_rows = Artifact.query.filter_by(case_id=case_id).order_by(Artifact.uploaded_at.desc()).all()
         artifacts = [r.to_dict() for r in artifact_rows]
-        # ---- FIX: normalize/parsing for artifacts coming from DB (dicts) ----
+        # ---- normalize/parsing for artifacts coming from DB (dicts) ----
         for a in artifacts:
             try:
                 val = a.get("analysis")
@@ -1438,7 +1393,6 @@ def dashboard():
             except Exception as e:
                 logger.warning("Failed to normalize analysis for artifact %s: %s", a.get("artifact_id"), e)
                 a["analysis"] = {}
-        # ---- END FIX ----
 
         artifact_count = len(artifacts)
         case_info = case.to_dict()
@@ -1448,7 +1402,7 @@ def dashboard():
         artifact_count = len(artifacts)
         case_info = {"case_id": case_id, "created_at": None, "artifact_count": artifact_count}
 
-    # --- FIX: normalize analysis JSON and compute scores safely ---
+    # --- normalize analysis JSON and compute scores safely ---
     total_score = 0
     for art in artifacts:
         analysis = art.get("analysis") or {}
@@ -1483,8 +1437,6 @@ def dashboard():
         total_score += (final_score or 0)
 
     suspicion_score = round(total_score / len(artifacts), 2) if artifacts else 0
-
-    # ✅ Always return a response
     return render_template(
         "dashboard.html",
         case_id=case_id,
@@ -1497,11 +1449,6 @@ def dashboard():
 
 @app.route("/report")
 def report():
-    """
-    Report preview: collect case & artifacts from DB (preferred) or manifest (fallback)
-    and render templates/report.html for preview. Normalizes artifact records so the
-    template always receives consistent fields (parses JSON strings, supplies defaults).
-    """
     case_id = request.args.get("case_id", "case001")
 
     # Try DB first
@@ -1608,7 +1555,6 @@ def report():
                 "final_score": None
             })
 
-        # --- additional context needed by report.html (PDF/ZIP buttons, file presence) ---
     # data/<case_id> files used by timeline/report generation
     processes_path = os.path.join("data", case_id, "processes.csv")
     events_path = os.path.join("data", case_id, "events.json")
@@ -1621,7 +1567,6 @@ def report():
     except Exception:
         generated_at = datetime.utcnow().isoformat() + "Z"
 
-    # Try to build proper URLs for PDF / ZIP. If the reporting blueprint isn't present,
     # fall back to '#' so the template won't break (you can change the names to match your blueprint).
     try:
         # common case: reporting blueprint registered as 'reporting' with endpoints report_pdf, report_bundle
@@ -1653,21 +1598,10 @@ def report():
         bundle_url=bundle_url,
     )
 
-
-
-
-# ---------- render & serve PDF on-demand (regenerates from template) ----------
-# Paste this block right after your existing `report()` view in app.py
-
 from flask import make_response
 from jinja2 import TemplateError
 
 def _render_report_html(case_id):
-    """
-    Helper: reuse the same logic you use in /report to produce the template context
-    and render the HTML string for the PDF. This mirrors your report() function's
-    normalization so the PDF matches the page.
-    """
     case_id_local = case_id
 
     # Same manifest/db logic used in your report() view
@@ -1798,10 +1732,6 @@ def _render_report_html(case_id):
 
 @app.route("/report/bundle/<case_id>")
 def report_bundle_redirect(case_id):
-    """
-    Temporary compatibility redirect: forward legacy /report/bundle/<case_id>
-    to the new blueprint-based route that generates/serves the zip.
-    """
     # sanitize a bit
     try:
         safe = safe_case_id(case_id)
@@ -1813,14 +1743,8 @@ def report_bundle_redirect(case_id):
     # redirect to blueprint route (permanent if you want)
     return redirect(url_for("reporting.report_bundle", case_id=safe), code=302)
 
-
 @app.route("/report/pdf/<case_id>")
 def report_pdf(case_id):
-    """
-    Render the report template and attempt to convert to PDF on-the-fly.
-    Tries Playwright first, then pdfkit/wkhtmltopdf. Falls back to serving
-    an existing on-disk PDF if conversion fails.
-    """
     html = _render_report_html(case_id)
 
     # 1) Try Playwright first
@@ -1885,10 +1809,6 @@ def report_pdf(case_id):
 
 @app.route("/report/bundle/<case_id>")
 def report_bundle(case_id):
-    """
-    Serve an existing case zip if present, otherwise build a zip containing
-    report.pdf and manifest.json (and small helpful files) on demand.
-    """
     import glob, tempfile, shutil
     try:
         # 1) Look for an existing zip (many likely names / locations)
@@ -1978,10 +1898,6 @@ def report_bundle(case_id):
 
 @app.route("/heuristics", methods=["GET", "POST"])
 def heuristics_upload():
-    """
-    Ad-hoc UI: upload a file (choose a case_id if desired) to run heuristics analysis.
-    Renders templates/heuristics_upload.html (create this template — I provided earlier).
-    """
     if request.method == "POST":
         # reuse your existing save_uploaded_file helper that accepts file + case_id
         file = request.files.get("file")
@@ -2053,10 +1969,6 @@ def heuristics_upload():
 
 @app.route("/api/heuristics", methods=["POST"])
 def heuristics_api():
-    """
-    Programmatic API: accept multipart form-data field 'file' and optional 'case_id' & 'uploader'.
-    Returns the heuristics report JSON and persists it similarly to the upload flow.
-    """
     file = request.files.get("file")
     if not file:
         return jsonify({"error": "no file provided"}), 400
@@ -2122,13 +2034,9 @@ def heuristics_api():
 
     return jsonify({"status": "ok", "heuristics": heuristics_report, "metadata": metadata})
 
-
-
-
 @app.route("/test-analysis")
 def test_analysis():
     return "Test analysis route (no-op for upload demo)."
-
 
 @app.route("/artifact/<case_id>/<artifact_filename>")
 def download_artifact(case_id, artifact_filename):
@@ -2138,21 +2046,17 @@ def download_artifact(case_id, artifact_filename):
         abort(404)
     return send_file(safe_path, as_attachment=True)
 
-
 @app.route("/api/manifest/<case_id>")
 def api_manifest(case_id):
     manifest = load_manifest(case_id)
     return jsonify(manifest)
 
-
-# Optional: API endpoints to query DB records (for later frontend usage)
 @app.route("/api/db/case/<case_id>")
 def api_db_case(case_id):
     case = Case.query.filter_by(case_id=case_id).first()
     if not case:
         return jsonify({"error": "case not found"}), 404
     return jsonify(case.to_dict())
-
 
 @app.route("/api/db/artifacts/<case_id>")
 def api_db_artifacts(case_id):
@@ -2165,9 +2069,6 @@ def handle_file_too_large(e):
 
 @app.route("/api/ioc_check/<case_id>/<artifact_id>", methods=["GET", "POST"])
 def api_ioc_check(case_id, artifact_id):
-    """
-    Trigger IOC matching for a single artifact and return the matches.
-    """
     try:
         result = check_iocs_for_artifact(case_id, artifact_id)
         return jsonify({"status": "ok", "result": result})
@@ -2179,9 +2080,6 @@ def api_ioc_check(case_id, artifact_id):
 
 @app.route("/api/yara_check/<case_id>/<artifact_id>", methods=["GET", "POST"])
 def api_yara_check(case_id, artifact_id):
-    """
-    Trigger YARA scan for a single artifact and return matches.
-    """
     try:
         result = yara_scan_artifact(case_id, artifact_id)
         if result.get("error"):
@@ -2193,13 +2091,6 @@ def api_yara_check(case_id, artifact_id):
 
 @app.route("/api/recompute_score/<case_id>/<artifact_id>", methods=["POST", "GET"])
 def api_recompute_score(case_id, artifact_id):
-    """
-    Recompute IOC, YARA and Heuristics for a single artifact then compute & persist final score.
-    - Runs: check_iocs_for_artifact, yara_scan_artifact, analyze_file (heuristics), compute_final_score
-    - Persists results to: artifact JSON file (evidence/<case>/artifacts/<artifact_id>.json),
-      case manifest, and DB Artifact.analysis
-    Returns: JSON with final_score, breakdown and component details.
-    """
     try:
         # 1) locate artifact JSON on disk
         _, artifacts_dir = ensure_case_dirs(case_id)
@@ -2289,7 +2180,7 @@ def api_recompute_score(case_id, artifact_id):
         # 7) persist changes: artifact JSON (signed preferred, atomic fallback), merge safely
         try:
             existing = mutils.load_signed_metadata_safe(meta_path)
-            existing = mutils.normalize_metadata_dict(existing)            # overlay new meta (avoid copying any _meta)
+            existing = mutils.normalize_metadata_dict(existing)
             existing.pop("_meta", None)
             # merge analysis/top-level keys from meta into existing
             for k, v in (meta or {}).items():
@@ -2375,10 +2266,6 @@ def api_recompute_score(case_id, artifact_id):
 
 @app.route("/api/case/<case_id>/counts")
 def api_case_counts(case_id):
-    """
-    Return counts for artifacts (DB) and timeline (data/<case_id>/events.json).
-    Useful for the dashboard badge showing divergence.
-    """
     try:
         artifact_count = Artifact.query.filter_by(case_id=case_id).count()
     except Exception:
@@ -2399,13 +2286,8 @@ def api_case_counts(case_id):
 
     return jsonify({"artifact_count": artifact_count, "timeline_count": timeline_count})
 
-
 @app.route("/api/coc/add", methods=["POST"])
 def api_coc_add():
-    """
-    Add a Chain-of-Custody entry.
-    Body JSON: case_id, artifact_id, actor, action, from, to, reason, location, details (optional dict)
-    """
     body = request.get_json(force=True) or {}
     case_id = body.get("case_id")
     artifact_id = body.get("artifact_id")
@@ -2511,12 +2393,8 @@ def api_coc_add():
         logger.exception("Failed to create CoC entry for %s/%s", case_id, artifact_id)
         return jsonify({"error": str(e)}), 500
 
-
 @app.route("/api/coc/<case_id>/<artifact_id>", methods=["GET"])
 def api_coc_get(case_id, artifact_id):
-    """
-    Resilient CoC GET: try ORM first; if that returns nothing or fails, fallback to direct sqlite query.
-    """
     try:
         # lazy import (safe)
         from modules.models import ChainOfCustody
@@ -2533,7 +2411,6 @@ def api_coc_get(case_id, artifact_id):
     except Exception:
         logger.exception("Importing ChainOfCustody failed; falling back to sqlite")
 
-    # ---------- sqlite fallback ----------
     try:
         import sqlite3, os, json
         db_path = os.path.join(PROJECT_ROOT, "data", "triage.db")
@@ -2563,19 +2440,45 @@ def api_coc_get(case_id, artifact_id):
         logger.exception("sqlite fallback failed for CoC get %s/%s", case_id, artifact_id)
         return jsonify({"error": "failed to fetch"}), 500
 
-
 from glob import glob
+import json, os, hashlib
+from flask import jsonify
+
+def _recent_same_coc(db, case_id, artifact_id, action, details, within_seconds=6):
+    try:
+        import json, datetime
+        row = db.execute(
+            "SELECT ts, action, details FROM coc WHERE case_id = ? AND artifact_id = ? ORDER BY ts DESC LIMIT 1",
+            (case_id, artifact_id)
+        ).fetchone()
+        if not row:
+            return False
+
+        last_action = row["action"]
+        last_details = str(row["details"])
+        if last_action != action:
+            return False
+
+        try:
+            last_ts = datetime.datetime.fromisoformat(row["ts"])
+            if (datetime.datetime.utcnow() - last_ts).total_seconds() > within_seconds:
+                return False
+        except Exception:
+            pass
+
+        # Compare details dictionary content
+        curr_details = json.dumps(details, sort_keys=True)
+        return curr_details == last_details
+    except Exception:
+        return False
 
 @app.route("/api/coc/verify/<case_id>/<artifact_id>", methods=["GET"])
 def api_coc_verify(case_id, artifact_id):
-    """Verify artifact metadata integrity (with uploads fallback)."""
     try:
         _, artifacts_dir = ensure_case_dirs(case_id)
-
-        # Normal expected location
         meta_path = os.path.join(artifacts_dir, f"{artifact_id}.json")
 
-        # 🔍 If not found, search also in uploads subfolders (for extracted ZIPs)
+        # --- Locate metadata file ---
         if not os.path.exists(meta_path):
             alt = glob(os.path.join(artifacts_dir, "uploads", "**", f"{artifact_id}.json"), recursive=True)
             if alt:
@@ -2583,83 +2486,198 @@ def api_coc_verify(case_id, artifact_id):
             else:
                 return jsonify({"status": "error", "error": "metadata missing"}), 404
 
+        # --- Step 1: Verify HMAC signature ---
         ok, details = verify_signed_metadata(meta_path)
-        with open(meta_path, "r", encoding="utf-8") as fh:
-            meta = json.load(fh)
+        if not isinstance(details, dict):
+            details = {"error": str(details) or "HMAC signature invalid"}
 
-        # Determine SHA info
+        # --- Step 2: Load metadata safely ---
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fh:
+                meta = json.load(fh)
+        except json.JSONDecodeError as e:
+            from modules.utils import add_coc_entry
+            add_coc_entry(
+                db, case_id, artifact_id,
+                actor="system:verifier",
+                action="metadata_tampered",
+                location="verify",
+                details={
+                    "tampered": True,
+                    "hmac_ok": ok,
+                    "error": f"Invalid JSON ({e})"
+                }
+            )
+            logger.error(f"[CoC] Metadata JSON corrupt for {artifact_id}")
+            return jsonify({
+                "metadata_hmac_ok": ok,
+                "metadata_hmac_details": {"error": "Invalid JSON"},
+                "on_disk_sha256": None,
+                "computed_sha256": None,
+                "hash_match": False
+            })
+
+        if not isinstance(meta, dict) or not meta:
+            from modules.utils import add_coc_entry
+            add_coc_entry(
+                db, case_id, artifact_id,
+                actor="system:verifier",
+                action="metadata_tampered",
+                location="verify",
+                details={
+                    "tampered": True,
+                    "hmac_ok": ok,
+                    "message": "❌ Metadata missing or unreadable"
+                }
+            )
+            return jsonify({
+                "metadata_hmac_ok": False,
+                "metadata_hmac_details": {"error": "Metadata missing or unreadable"},
+                "on_disk_sha256": None,
+                "computed_sha256": None,
+                "hash_match": False
+            })
+
+        # --- Step 3: Compute file SHA256 ---
         on_disk_sha = meta.get("analysis", {}).get("latest_sha256") or meta.get("sha256")
         saved_path = meta.get("saved_path")
         computed_sha = None
         if saved_path and os.path.exists(saved_path):
-            import hashlib
             with open(saved_path, "rb") as fh:
                 computed_sha = hashlib.sha256(fh.read()).hexdigest()
+
+        hash_match = bool(on_disk_sha and computed_sha and on_disk_sha == computed_sha)
+        hash_mismatch = bool(on_disk_sha and computed_sha and on_disk_sha != computed_sha)
+        tampered = not ok
 
         result = {
             "metadata_hmac_ok": ok,
             "metadata_hmac_details": details,
             "on_disk_sha256": on_disk_sha,
-            "computed_sha256": computed_sha
+            "computed_sha256": computed_sha,
+            "hash_match": hash_match
         }
+        logger.debug(f"[verify-debug] {case_id}/{artifact_id} ok={ok} tampered={tampered} hash_match={hash_match} expected={on_disk_sha} observed={computed_sha}")
 
-        # Record audit
+        # --- Step 4: Record audit event ---
         if not ok:
             record_audit(db, case_id, artifact_id, "system:verifier", "metadata_hmac_mismatch", details)
-        elif on_disk_sha and computed_sha and on_disk_sha != computed_sha:
-            record_audit(db, case_id, artifact_id, "system:verifier", "hash_mismatch", {"expected": on_disk_sha, "observed": computed_sha})
+        elif hash_mismatch:
+            record_audit(db, case_id, artifact_id, "system:verifier", "hash_mismatch",
+                         {"expected": on_disk_sha, "observed": computed_sha})
         else:
-            record_audit(db, case_id, artifact_id, "system:verifier", "hash_ok", {"sha256": computed_sha})
+            record_audit(db, case_id, artifact_id, "system:verifier", "hash_ok",
+                         {"sha256": computed_sha})
 
-        # Add CoC entry for verification
-        try:
-            from modules.utils import add_coc_entry
-            coc_action = "metadata_verified" if ok else "metadata_tampered"
-            coc_details = details if isinstance(details, dict) else {"details": details}
-            add_coc_entry(db, case_id, artifact_id, actor="system:verifier", action=coc_action, location="server", details=coc_details)
-        except Exception:
-            logger.exception("Failed to add CoC entry after verification for %s/%s", case_id, artifact_id)
+        # --- Step 5: Add CoC entry for every case ---
+        from modules.utils import add_coc_entry
 
+        # ✅ Prevent false duplicate “verified” logs
+        if not ok:
+            action = "metadata_tampered"
+            msg = "❌ Metadata tampered — signature invalid"
+        elif not computed_sha and not on_disk_sha:
+            # metadata missing, invalid, or incomplete
+            action = "metadata_tampered"
+            msg = "❌ Metadata missing or unreadable"
+        elif hash_mismatch:
+            action = "hash_mismatch"
+            msg = "⚠️ Hash mismatch — possible content change"
+        else:
+            action = "metadata_verified"
+            msg = "✅ Metadata verified successfully"
+
+        details_dict = {
+            "tampered": tampered,
+            "hmac_ok": ok,
+            "expected": on_disk_sha,
+            "observed": computed_sha,
+            "match": hash_match,
+            "message": msg
+        }
+
+        # --- Prevent duplicate CoC spam ---
+        if not _recent_same_coc(db, case_id, artifact_id, action, details_dict):
+            add_coc_entry(
+                db,
+                case_id,
+                artifact_id,
+                actor="system:verifier",
+                action=action,
+                location="verify",
+                details=details_dict
+            )
+            logger.info(f"[CoC] {action} recorded for {artifact_id}")
+        else:
+            logger.info(f"[CoC] skipped duplicate {action} for {artifact_id}")
         return jsonify(result)
 
-    except Exception:
-        logger.exception("Verification endpoint failed for %s/%s", case_id, artifact_id)
+    except Exception as e:
+        logger.exception(f"Verification endpoint failed for {case_id}/{artifact_id}: {e}")
         return jsonify({"error": "verification failed"}), 500
 
-# add near other route handlers in app.py (replace any existing view_case_coc)
 from flask import render_template
-from modules.models import ChainOfCustody  # already imported earlier in your file
+from modules.models import ChainOfCustody
 import sqlite3, json
+
+def _safe_json(raw):
+    if not raw:
+        return None
+    if isinstance(raw, (dict, list)):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except Exception:
+            return raw
+    return raw
 
 @app.route("/coc/case/<case_id>")
 def view_case_coc(case_id):
-    """
-    Render case-level Chain-of-Custody / audit entries aggregated for the case.
-    This is defensive: it queries DB rows and converts them to plain dicts for the template.
-    """
     try:
-        # Primary: query ChainOfCustody ORM rows if model is available
+        entries = []
         try:
-            rows = ChainOfCustody.query.filter_by(case_id=case_id).order_by(ChainOfCustody.ts.asc()).all()
+            rows = ChainOfCustody.query.filter_by(case_id=case_id).order_by(ChainOfCustody.ts.desc()).all()
             entries = [r.to_dict() if hasattr(r, "to_dict") else {
                 "id": getattr(r, "id", None),
                 "ts": getattr(r, "ts", None).isoformat() + "Z" if getattr(r, "ts", None) else None,
                 "case_id": getattr(r, "case_id", None),
                 "artifact_id": getattr(r, "artifact_id", None),
+                "filename": getattr(r, "filename", None),  # ✅ Added this line
                 "actor": getattr(r, "actor", None),
                 "action": getattr(r, "action", None),
-                "details": (json.loads(getattr(r, "details")) if getattr(r, "details") else None)
+                "details": _safe_json(getattr(r, "details")),
             } for r in rows]
+
+            # --- Fallback: enrich with filename if missing ---
+            try:
+                db_path = os.path.join(PROJECT_ROOT, "data", "triage.db")
+                con = sqlite3.connect(db_path)
+                cur = con.cursor()
+                cur.execute("SELECT artifact_id, original_filename FROM artifacts")
+                artifact_map = {aid: fname for aid, fname in cur.fetchall()}
+                con.close()
+
+                for e in entries:
+                    if not e.get("filename") and e.get("artifact_id") in artifact_map:
+                        e["filename"] = artifact_map[e["artifact_id"]]
+            except Exception as enrich_err:
+                logger.warning(f"[CoC] Could not enrich filenames: {enrich_err}")
+
         except Exception:
-            # If ORM call fails for some reason, fallback to direct sqlite query (robust)
-            entries = []
+            # --- Fallback: direct SQLite query ---
             db_path = os.path.join(PROJECT_ROOT, "data", "triage.db")
             try:
                 con = sqlite3.connect(db_path)
                 cur = con.cursor()
-                cur.execute("SELECT id, ts, case_id, artifact_id, actor, action, details FROM chain_of_custody WHERE case_id=? ORDER BY ts ASC", (case_id,))
-                for id_, ts, caseid, aid, actor, action, details in cur.fetchall():
-                    # normalize details (try parse json)
+                cur.execute("""
+                    SELECT id, ts, case_id, artifact_id, filename, actor, action, details, signature
+                    FROM chain_of_custody
+                    WHERE case_id=?
+                    ORDER BY ts ASC
+                """, (case_id,))
+
+                for id_, ts, caseid, aid, fname, actor, action, details, signature in cur.fetchall():
                     try:
                         d = json.loads(details) if details else None
                     except Exception:
@@ -2669,20 +2687,29 @@ def view_case_coc(case_id):
                         "ts": ts,
                         "case_id": caseid,
                         "artifact_id": aid,
+                        "filename": fname,
                         "actor": actor,
                         "action": action,
-                        "details": d
+                        "details": d,
+                        "signature": signature
                     })
+
                 con.close()
             except Exception:
+                logger.exception("SQLite fallback failed for CoC view.")
                 entries = []
 
+        print(f"[DEBUG CoC] Entries fetched for {case_id}: {len(entries)}")
+        if entries:
+            print(f"Sample entry: {entries[0]}")
+        else:
+            print("⚠️ No entries found for this case.")
+
         return render_template("coc_case.html", case_id=case_id, entries=entries)
+
     except Exception:
         logger.exception("Failed to render case-level CoC for %s", case_id)
-        # render template but ensure entries is a list (template handles empty)
         return render_template("coc_case.html", case_id=case_id, entries=[]), 500
-
 
 if __name__ == "__main__":
     app.run(debug=True)

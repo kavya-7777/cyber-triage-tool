@@ -1,42 +1,59 @@
-// static/js/upload.js — minimal AJAX uploader + response preview
+// static/js/upload.js 
 document.addEventListener('DOMContentLoaded', function() {
     const form = document.getElementById('uploadForm');
     const status = document.getElementById('uploadStatus');
-    const showRaw = document.getElementById('showRawJson');
-
 
     if (!form) return;
 
-    form.addEventListener('submit', async function(e){
+    form.addEventListener('submit', async function(e) {
         e.preventDefault();
-        status.innerHTML = 'Uploading...';
-        const fd = new FormData(form);
+        status.innerHTML = '<span class="text-info">Uploading...</span>';
 
+        const fd = new FormData(form);
+        const caseId = fd.get('case_id');
+        const uploader = fd.get('uploader');
+        const fileObj = fd.get('file');
+        const fileName = fileObj && fileObj.name ? fileObj.name : null;
+
+        // Handle empty file selection
+        if (!fileName) {
+            status.innerHTML = `
+                <div class="alert alert-warning mt-3" role="alert">
+                    ⚠️ No file selected. Please choose a file before uploading.
+                </div>
+            `;
+            return;
+        }
 
         try {
             const resp = await fetch(form.action, { method: 'POST', body: fd });
-            let text;
+            let data = {};
             try {
-                const json = await resp.json();
-                text = JSON.stringify(json, null, 2);
-            } catch (err) {
-                text = await resp.text();
+                data = await resp.json();
+            } catch {
+                // ignore non-JSON responses
             }
-            if (showRaw && showRaw.checked) {
-                status.innerHTML = `<pre style="white-space:pre-wrap">${text}</pre>`;
+
+            if (resp.ok && !data.error) {
+                status.innerHTML = `
+                    <div class="alert alert-success mt-3" role="alert">
+                        ✅ Upload complete — File <strong>${fileName}</strong> uploaded successfully.
+                    </div>
+                `;
             } else {
-                // Try to show a compact summary
-            try {
-                const j = JSON.parse(text);
-                const files_processed = j.per_file ? j.per_file.length : (j.metadata ? 1 : 0);
-                const score = j.metadata && j.metadata.analysis ? (j.metadata.analysis.final_score || j.metadata.analysis.suspicion_score) : (j.per_file && j.per_file[0] && j.per_file[0].final_score);
-                status.innerHTML = `<div class="alert alert-success">Upload complete — files processed: ${files_processed}. <br/> Case: ${j.case_id || ''} <br/> Score: ${score !== undefined ? score : 'N/A'}</div><pre style="white-space:pre-wrap">${text}</pre>`;
-            } catch (e) {
-                status.innerHTML = `<pre style="white-space:pre-wrap">${text}</pre>`;
+                const errMsg = data.error || "Upload failed due to server error.";
+                status.innerHTML = `
+                    <div class="alert alert-danger mt-3" role="alert">
+                        ❌ Upload failed — ${errMsg}
+                    </div>
+                `;
             }
-        }   
-    } catch (err) {
-        status.textContent = 'Upload failed: ' + err;
-    }
+        } catch (err) {
+            status.innerHTML = `
+                <div class="alert alert-danger mt-3" role="alert">
+                    ❌ Upload error — ${err.message}
+                </div>
+            `;
+        }
     });
 });

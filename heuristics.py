@@ -1,17 +1,5 @@
 # heuristics.py
-"""
-Refined heuristic anomaly checks for Cyber Triage Tool.
 
-Improvements added:
- - Normalizes paths to forward slashes for consistent pattern matching.
- - Single-pass entropy + printable/top-byte computation to avoid double-reading large files.
- - Top-byte output now includes both integer and hex string.
- - check_pe_signed() checks DIRECTORY_ENTRY_SECURITY and DATA_DIRECTORY entries.
- - analyze_file() gains optional compute_entropy and max_entropy_bytes to limit work.
- - Precompile suspicious path regexes at module-load for speed and correctness.
- - Proper resource cleanup (pe.close()) and lightweight logging.
- - More robust error fields in returned report so UI can show why something is unknown.
-"""
 from __future__ import annotations
 import os
 import math
@@ -24,9 +12,6 @@ from typing import Tuple, Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------
-# Tunables & thresholds
-# ---------------------------
 ENTROPY_THRESHOLD = 7.2
 ENTROPY_WARNING_THRESHOLD = 6.5
 
@@ -57,9 +42,6 @@ WEIGHTS = {
     "pe_unsigned": 0.25
 }
 
-# ---------------------------
-# Core helpers
-# ---------------------------
 def shannon_entropy_from_counts(counts: List[int], length: int) -> float:
     if length <= 0:
         return 0.0
@@ -71,18 +53,11 @@ def shannon_entropy_from_counts(counts: List[int], length: int) -> float:
         ent -= p * math.log2(p)
     return ent
 
-
 def compute_entropy_and_printable(path: str,
                                   chunk_size: int = 65536,
                                   sample_bytes: int = PRINTABLE_RATIO_CHUNK,
                                   max_entropy_bytes: Optional[int] = None
                                   ) -> Dict[str, Any]:
-    """
-    Single-pass: compute byte-frequency counts (for entropy) up to max_entropy_bytes (None => whole file).
-    Also compute printable ratio over the first `sample_bytes`.
-    Returns: { entropy, printable_ratio, top_bytes, scanned_bytes }
-    top_bytes entries: { byte: int, hex: str, count: int }
-    """
     counts = [0] * 256
     total = 0
     printable_sample = 0
@@ -122,11 +97,7 @@ def compute_entropy_and_printable(path: str,
 
     return {"entropy": entropy, "printable_ratio": printable_ratio, "top_bytes": top_bytes, "scanned_bytes": total}
 
-
 def compute_file_entropy(path: str, chunk_size: int = 65536) -> float:
-    """
-    Backwards-compatible wrapper: compute full-file entropy.
-    """
     res = compute_entropy_and_printable(path, chunk_size=chunk_size, sample_bytes=0, max_entropy_bytes=None)
     return float(res.get("entropy", 0.0))
 
@@ -144,9 +115,6 @@ def char_entropy(s: str) -> float:
         ent -= p * math.log2(p)
     return ent
 
-# ---------------------------
-# Filename & path heuristics
-# ---------------------------
 def suspicious_filename(path_or_name: str) -> Tuple[bool, List[str]]:
     reasons: List[str] = []
     name = os.path.basename(path_or_name or "")
@@ -173,7 +141,6 @@ def suspicious_filename(path_or_name: str) -> Tuple[bool, List[str]]:
 
     return (len(reasons) > 0, reasons)
 
-
 def suspicious_path(path: str) -> Tuple[bool, List[str]]:
     reasons: List[str] = []
     if not path:
@@ -194,9 +161,6 @@ def suspicious_path(path: str) -> Tuple[bool, List[str]]:
 
     return (len(reasons) > 0, reasons)
 
-# ---------------------------
-# PE checks
-# ---------------------------
 def is_pe_file(path: str) -> bool:
     try:
         with open(path, 'rb') as f:
@@ -207,10 +171,6 @@ def is_pe_file(path: str) -> bool:
 
 
 def check_pe_signed(path: str) -> Dict[str, Optional[Any]]:
-    """
-    Best-effort check: returns {'signed': True/False/None, 'reason': str}
-    'None' indicates unknown (pefile missing or parse error).
-    """
     try:
         import pefile
     except Exception:
@@ -255,9 +215,6 @@ def check_pe_signed(path: str) -> Dict[str, Optional[Any]]:
         except Exception:
             pass
 
-# ---------------------------
-# Scoring utilities
-# ---------------------------
 def _score_entropy(entropy: float) -> float:
     if entropy >= ENTROPY_THRESHOLD:
         return 100.0
@@ -267,12 +224,10 @@ def _score_entropy(entropy: float) -> float:
     frac = (entropy - ENTROPY_WARNING_THRESHOLD) / (span if span > 0 else 1.0)
     return 40.0 + frac * 50.0
 
-
 def _score_filename_flags(fname_flag: bool, n_reasons: int) -> float:
     if not fname_flag:
         return 0.0
     return min(100.0, 40.0 + min(n_reasons, 4) * 15.0)
-
 
 def _score_pe_unsigned(unsigned_flag: Optional[bool]) -> float:
     if unsigned_flag is True:
@@ -281,26 +236,15 @@ def _score_pe_unsigned(unsigned_flag: Optional[bool]) -> float:
         return 0.0
     return 20.0
 
-
 def clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
-# ---------------------------
-# Main analyzer
-# ---------------------------
 def analyze_file(path: str,
                  entropy_threshold: float = ENTROPY_THRESHOLD,
                  entropy_warning: float = ENTROPY_WARNING_THRESHOLD,
                  compute_entropy: bool = True,
                  max_entropy_bytes: Optional[int] = None
                  ) -> Dict[str, Any]:
-    """
-    Analyze a file and return a structured report.
-
-    Arguments:
-      - compute_entropy: when False, do a fast sample (no full-file entropy).
-      - max_entropy_bytes: if not None, limit entropy computation to this many bytes (approx).
-    """
     report: Dict[str, Any] = {}
     report['path'] = path
     report['filename'] = os.path.basename(path)
@@ -427,9 +371,6 @@ def analyze_file(path: str,
 
     return report
 
-# ---------------------------
-# CLI support
-# ---------------------------
 def _scan_path(path: str, recursive: bool = False) -> List[Dict[str, Any]]:
     reports = []
     if os.path.isfile(path):
@@ -445,7 +386,6 @@ def _scan_path(path: str, recursive: bool = False) -> List[Dict[str, Any]]:
         if not recursive:
             break
     return reports
-
 
 def main(argv=None):
     p = argparse.ArgumentParser(description='Heuristic anomaly checks (entropy, filename, path, unsigned PE)')
@@ -472,7 +412,6 @@ def main(argv=None):
         print(f'Written {len(reports)} reports to {args.output}')
     else:
         print(out)
-
 
 if __name__ == '__main__':
     # Simple logging setup for CLI use

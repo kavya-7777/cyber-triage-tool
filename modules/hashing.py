@@ -16,7 +16,6 @@ from modules.models import Artifact
 
 logger = logging.getLogger(__name__)
 
-
 def compute_sha256(file_path):
     """
     Compute SHA-256 of file at file_path in streaming fashion.
@@ -30,7 +29,6 @@ def compute_sha256(file_path):
             sha256.update(chunk)
     return sha256.hexdigest(), total
 
-
 def find_artifact_by_sha(sha256_hex):
     """
     Return the Artifact DB row that has the given sha256 (most-recent).
@@ -41,7 +39,6 @@ def find_artifact_by_sha(sha256_hex):
     except Exception:
         logger.exception("DB lookup failed for sha lookup")
         return None
-
 
 def update_artifact_hash(case_id, artifact_id, sha256_hex, actor="system"):
     """
@@ -133,7 +130,6 @@ def update_artifact_hash(case_id, artifact_id, sha256_hex, actor="system"):
                 logger.exception("Failed to write audit for hash_recorded %s/%s", case_id, artifact_id)
     except Exception:
         logger.exception("Failed updating DB artifact for %s", artifact_id)
-
 
 def record_duplicate_detection(case_id, artifact_id, existing_artifact_id, sha256_hex, actor="system"):
     """

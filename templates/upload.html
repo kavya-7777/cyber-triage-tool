@@ -1,68 +1,56 @@
+<!-- templates/upload.html -->
+
 {% extends "base.html" %}
 {% block title %}Upload Evidence{% endblock %}
 
 {% block content %}
-<div class="hero">
-  <div class="d-flex justify-content-between align-items-center">
-    <div>
-      <h1 class="mb-1">Upload Evidence <small class="muted">— Case: <strong>{{ request.args.get('case_id','case001') }}</strong></small></h1>
-      <div class="small text-white">Upload a single artifact or ZIP. The system will extract timeline files & run analysis hooks.</div>
-    </div>
-  </div>
-</div>
+<style>
+  .page-center {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+</style>
 
-<div class="row">
-  <div class="col-md-8">
+<div class="page-center">
+  <div class="col-md-6">
+    <div class="hero text-center mb-4">
+      <h1 class="mb-1">Upload Evidence</h1>
+      <div class="small text-white">
+        Upload a single file or ZIP. The system will extract timeline files & run analysis hooks.
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-body">
-        <form id="uploadForm" method="POST" action="/upload" enctype="multipart/form-data" class="mt-3">
+        <form id="uploadForm" method="POST" action="/upload" enctype="multipart/form-data">
           <div class="mb-3">
             <label class="form-label">Case ID</label>
-            <input type="text" name="case_id" class="form-control" placeholder="case001" value="{{ request.args.get('case_id','case001') }}">
+            <input type="text" name="case_id" class="form-control" placeholder="case001"
+              value="{{ request.args.get('case_id','case001') }}">
           </div>
 
           <div class="mb-3">
-            <label class="form-label">Uploader (investigator)</label>
-            <input type="text" name="uploader" class="form-control" placeholder="investigator" value="{{ request.args.get('uploader','investigator') }}">
+            <label class="form-label">Uploader</label>
+            <input type="text" name="uploader" class="form-control" placeholder="investigator"
+              value="{{ request.args.get('uploader','Investigator') }}">
           </div>
 
           <div class="mb-3">
-            <label class="form-label">File (single artifact or ZIP)</label>
+            <label class="form-label">File</label>
             <input type="file" name="file" id="fileInput" class="form-control">
-            <div class="form-text">Single file or ZIP archive. For demo use <code>case001</code>.</div>
           </div>
 
-          <div class="mb-3 form-check">
-            <input type="checkbox" class="form-check-input" id="showRawJson" />
-            <label class="form-check-label" for="showRawJson">Show raw server JSON response after processing</label>
+          <div class="text-center">
+            <button id="uploadBtn" type="submit" class="btn btn-primary mt-2">
+              Upload & Process
+            </button>
           </div>
-
-          <button id="uploadBtn" type="submit" class="btn btn-primary">Upload & Process</button>
         </form>
       </div>
     </div>
 
-    <div id="uploadStatus" style="margin-top: 18px;"></div>
-  </div>
-
-  <div class="col-md-4">
-    <div class="card" style="border-left:4px solid var(--accent);">
-      <div class="card-body">
-        <h6 class="card-subtitle mb-2 text-muted">Tips</h6>
-        <ul class="small">
-          <li>Upload a ZIP with extracted timeline files (<code>processes.csv</code>, <code>events.json</code>).</li>
-          <li>The system will try to extract artifacts' metadata and update timelines automatically.</li>
-          <li>Use the <strong>Show raw server JSON</strong> toggle to inspect responses after upload.</li>
-        </ul>
-      </div>
-    </div>
-
-    <div class="card mt-3">
-      <div class="card-body small muted">
-        <strong>Demo</strong><br/>
-        Use <code>case001</code> to explore the sample dataset and visualize timelines & scoring.
-      </div>
-    </div>
+    <div id="uploadStatus" class="text-center mt-3"></div>
   </div>
 </div>
 

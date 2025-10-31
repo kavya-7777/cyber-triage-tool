@@ -1,3 +1,5 @@
+# modules/zip_ingest.py
+
 import os
 import zipfile
 import csv
@@ -8,12 +10,8 @@ from typing import List, Dict
 logger = logging.getLogger(__name__)
 
 def safe_extract_zip(zip_path: str, dest_dir: str, case_id: str) -> List[str]:
-    """
-    Securely extract ZIP to dest_dir and copy extracted metadata to evidence/<case_id>/artifacts/.
-    Returns a list of extracted file paths.
-    """
     import json
-    from modules.hashing import compute_sha256  # ✅ make sure hashing module is imported
+    from modules.hashing import compute_sha256 
 
     extracted = []
     os.makedirs(dest_dir, exist_ok=True)
@@ -73,10 +71,6 @@ def safe_extract_zip(zip_path: str, dest_dir: str, case_id: str) -> List[str]:
     return extracted
 
 def _append_csv_to_processes(src_csv: str, dst_processes: str) -> int:
-    """
-    Append rows from src_csv into dst_processes. If dst doesn't exist copy header+rows.
-    Return number of rows appended.
-    """
     if not os.path.exists(src_csv):
         return 0
     appended = 0
@@ -103,13 +97,6 @@ def _append_csv_to_processes(src_csv: str, dst_processes: str) -> int:
 
 
 def process_extracted_files(case_id: str, extracted_paths: List[str]) -> Dict:
-    """
-    Process extracted files to produce:
-      - data/<case_id>/processes.csv
-      - data/<case_id>/events.json
-
-    Returns summary dict with counts.
-    """
     out_dir = os.path.join("data", case_id)
     os.makedirs(out_dir, exist_ok=True)
     processes_path = os.path.join(out_dir, "processes.csv")
@@ -153,8 +140,6 @@ def process_extracted_files(case_id: str, extracted_paths: List[str]) -> Dict:
             logger.exception("Error processing extracted file %s", p)
             summary["errors"].append({"path": p, "error": str(e)})
 
-    # Ensure the canonical timeline files exist so downstream consumers don't complain.
-    # If no CSV rows were written, create an empty file (touch) so build_timeline finds it.
     try:
         if not os.path.exists(processes_path):
             # create an empty file (header unknown) -- at least the file exists for the timeline builder
@@ -169,14 +154,9 @@ def process_extracted_files(case_id: str, extracted_paths: List[str]) -> Dict:
     return summary
 
 def deduplicate_artifacts(per_file: List[Dict]) -> List[Dict]:
-    """
-    Remove duplicate artifacts from per_file list based on artifact_id.
-    Keeps the first occurrence.
-    """
     unique = {}
     for item in per_file:
         aid = item.get("artifact_id")
         if aid and aid not in unique:
             unique[aid] = item
     return list(unique.values())
-

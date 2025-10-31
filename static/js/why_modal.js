@@ -2,7 +2,6 @@
 (function(){
   "use strict";
 
-  // safe JSON parse accepting objects or JSON strings
   function safeParse(raw){
     if(!raw && raw !== 0) return null;
     if(typeof raw === 'object') return raw;
@@ -26,51 +25,79 @@
   }
 
   // Render the top horizontal weights bars (like the screenshot)
-  function renderWeightBars(weights){
-    // weights expected like {ioc:0.4, yara:0.3, heuristics:0.3} or similar
-    const wrap = make('div', '');
-    wrap.style.display = 'flex';
-    wrap.style.gap = '12px';
-    wrap.style.alignItems = 'center';
+function renderWeightBars(weights){
+  const wrap = make('div', '');
+  wrap.style.display = 'flex';
+  wrap.style.gap = '20px';
+  wrap.style.alignItems = 'center';
+  wrap.style.flexWrap = 'wrap';
+  wrap.style.justifyContent = 'center';
 
-    const comps = [
-      {k:'ioc', label:'IOC'},
-      {k:'yara', label:'YARA'},
-      {k:'heuristics', label:'HEURISTICS'}
-    ];
+  const comps = [
+    {k:'ioc', label:'IOC'},
+    {k:'yara', label:'YARA'},
+    {k:'heuristics', label:'HEURISTICS'}
+  ];
 
-    comps.forEach(c => {
-      const val = Math.round(((weights && typeof weights[c.k] !== 'undefined') ? weights[c.k] : 0) * 100);
-      const colWrap = make('div', 'd-flex flex-column');
-      colWrap.style.width = '180px';
+  comps.forEach(c => {
+    const val = Math.round(((weights && typeof weights[c.k] !== 'undefined') ? weights[c.k] : 0) * 100);
 
-      const lbl = make('div', 'small', `${c.label} (${val}%)`);
-      lbl.style.marginBottom = '4px';
-      const prog = make('div', 'progress');
-      prog.style.height = '8px';
-      const bar = make('div', 'progress-bar');
-      bar.style.width = '0%';
-      bar.setAttribute('role','progressbar');
-      bar.setAttribute('aria-valuemin','0');
-      bar.setAttribute('aria-valuemax','100');
-      bar.setAttribute('aria-valuenow','0');
+    // wrapper
+    const item = make('div', 'd-flex align-items-center');
+    item.style.gap = '6px';
 
-      // color by weight (not value) to keep consistent look
-      if(val >= 70) bar.classList.add('bg-danger');
-      else if(val > 30) bar.classList.add('bg-warning');
-      else bar.classList.add('bg-success');
+    // small circular SVG indicator
+    const svgNS = "http://www.w3.org/2000/svg";
+    const size = 24;
+    const strokeWidth = 3;
+    const radius = (size - strokeWidth) / 2;
+    const circumference = 2 * Math.PI * radius;
+    const circleColor = val >= 70 ? '#dc3545' : val > 30 ? '#ffc107' : '#28a745';
 
-      prog.appendChild(bar);
-      colWrap.appendChild(lbl);
-      colWrap.appendChild(prog);
-      wrap.appendChild(colWrap);
+    const svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("width", size);
+    svg.setAttribute("height", size);
+    svg.style.transform = "rotate(-90deg)";
 
-      // animate little later
-      setTimeout(()=> animateBar(bar, val), 80);
-    });
+    const bg = document.createElementNS(svgNS, "circle");
+    bg.setAttribute("cx", size/2);
+    bg.setAttribute("cy", size/2);
+    bg.setAttribute("r", radius);
+    bg.setAttribute("stroke", "#e5e5e5");
+    bg.setAttribute("stroke-width", strokeWidth);
+    bg.setAttribute("fill", "none");
+    svg.appendChild(bg);
 
-    return wrap;
-  }
+    const fg = document.createElementNS(svgNS, "circle");
+    fg.setAttribute("cx", size/2);
+    fg.setAttribute("cy", size/2);
+    fg.setAttribute("r", radius);
+    fg.setAttribute("stroke", circleColor);
+    fg.setAttribute("stroke-width", strokeWidth);
+    fg.setAttribute("fill", "none");
+    fg.setAttribute("stroke-dasharray", circumference);
+    fg.setAttribute("stroke-dashoffset", circumference);
+    fg.style.transition = "stroke-dashoffset 1s ease";
+    svg.appendChild(fg);
+
+    // animate the stroke
+    setTimeout(() => {
+      const offset = circumference - (val / 100) * circumference;
+      fg.setAttribute("stroke-dashoffset", offset);
+    }, 100);
+
+    // label + number
+    const label = make('div', 'small fw-semibold', `${c.label} ${val}%`);
+    label.style.textTransform = 'uppercase';
+    label.style.minWidth = '90px';
+
+    item.appendChild(svg);
+    item.appendChild(label);
+    wrap.appendChild(item);
+  });
+
+  return wrap;
+}
 
   // Render detailed component breakdown bars (IOC/YARA/Heuristics component score)
   function renderComponentBars(breakdown, weights){
@@ -126,74 +153,9 @@
     return wrapper;
   }
 
-  // Render lists of IOC / YARA matches into the details area
-  function renderDetailsLists(data, detailsEl){
-    detailsEl.innerHTML = '';
-
-    // IOC matches
-    if(Array.isArray(data.ioc_matches) && data.ioc_matches.length){
-      const h = make('h6','mt-2','IOC Matches');
-      detailsEl.appendChild(h);
-      const ul = make('ul','small');
-      data.ioc_matches.forEach(m => {
-        const li = make('li','');
-        try {
-          const t = m.type || m.match_type || '';
-          const v = m.value || m.ioc || m.hash || m.filename || (typeof m === 'string' ? m : JSON.stringify(m));
-          const conf = m.confidence ? ` (confidence=${m.confidence})` : '';
-          li.textContent = `${t ? (t + ': ') : ''}${v}${conf}`;
-        } catch(e){
-          li.textContent = JSON.stringify(m);
-        }
-        ul.appendChild(li);
-      });
-      detailsEl.appendChild(ul);
-    }
-
-    // YARA matches
-    if(Array.isArray(data.yara_matches) && data.yara_matches.length){
-      const h = make('h6','mt-2','YARA Matches');
-      detailsEl.appendChild(h);
-      data.yara_matches.forEach(y => {
-        const row = make('div','mb-2 small');
-        try {
-          const name = y.rule || y.rule_name || (y.meta && y.meta.name) || '<unnamed>';
-          const tags = Array.isArray(y.tags) ? (` [${y.tags.join(',')}]`) : '';
-          row.innerHTML = `<strong>${name}</strong>${tags}<br/>`;
-          // include meta if present and small
-          if(y.meta && typeof y.meta === 'object' && Object.keys(y.meta).length){
-            const pre = make('pre','small');
-            pre.style.fontSize = '11px';
-            pre.textContent = JSON.stringify(y.meta, null, 2);
-            row.appendChild(pre);
-          }
-        } catch(e){
-          row.textContent = JSON.stringify(y);
-        }
-        detailsEl.appendChild(row);
-      });
-    }
-
-    // Heuristics raw (if present)
-    if(data.heuristics && (typeof data.heuristics === 'object') && Object.keys(data.heuristics).length){
-      const h = make('h6','mt-2','Heuristics (raw)');
-      detailsEl.appendChild(h);
-      const pre = make('pre','small');
-      pre.style.fontSize = '11px';
-      // try to show compact heuristics keys (don't dump huge binary)
-      const copy = Object.assign({}, data.heuristics);
-      // redact binary-ish entries if present
-      try {
-        if(copy.component_scores) copy.component_scores = copy.component_scores;
-      } catch(e){}
-      pre.textContent = JSON.stringify(copy, null, 2);
-      detailsEl.appendChild(pre);
-    }
-
-    if(detailsEl.innerHTML.trim() === ''){
-      detailsEl.innerHTML = '<div class="text-muted small">No detailed matches found.</div>';
-    }
-  }
+function renderDetailsLists(data, detailsEl){
+  detailsEl.innerHTML = ''; // hide JSON section entirely
+}
 
   // Populate the modal UI given the analysis payload
   function populateModal(payload){
@@ -229,11 +191,6 @@
     if (payload.analysis && !payload.reasons && payload.analysis.reasons) {
       payload.reasons = payload.analysis.reasons;
     }
-
-    const artifact_id = payload.artifact_id || payload.artifact || (payload.analysis && payload.analysis.artifact_id) || '';
-
-    scoreEl.textContent = (typeof finalScore === 'number' ? Math.round(finalScore) : finalScore) + '%';
-    idEl.textContent = artifact_id;
 
     // Build weight display for top bars
     const weights = payload.weights || (payload.analysis && payload.analysis.weights) || (function(){

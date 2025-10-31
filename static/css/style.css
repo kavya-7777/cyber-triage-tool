@@ -1,6 +1,4 @@
-/* ===============================
-   SYNC5 Dark Theme Stylesheet
-   =============================== */
+/* static/css/style.css */
 
 :root {
   --bg: #0b0f1a;
@@ -8,11 +6,11 @@
   --grid-line: rgba(255,255,255,0.05);
   --text: #969696;
   --muted: #9ca3af;
-  --accent: #00ff88;   /* neon green accent (updated) */
-  --accent2: #00bcd4;  /* cyan accent */
+  --accent: #00ff88;   
+  --accent2: #00bcd4;  
   --danger: #ff3366;
   --warning: #ffb84d;
-  --success: #00ff88;  /* updated */
+  --success: #00ff88;  
   --card-bg: #1e2533;
   --border: rgba(255,255,255,0.1);
   --font: 'Inter', 'Roboto', 'Segoe UI', Arial, sans-serif;
@@ -202,7 +200,7 @@ footer {
 
 /* Artifacts list container */
 .table-responsive {
-  background: #1e293b; /* softer navy/gray background */
+  background: #1e293b; 
   border-radius: 10px;
   padding: 12px;
   box-shadow: 0 2px 6px rgba(0,0,0,0.25);
@@ -210,19 +208,19 @@ footer {
 
 /* Table header */
 .table thead th {
-  background: #2d3748; /* softer dark header */
-  color: #e2e8f0;      /* light gray text */
+  background: #2d3748; 
+  color: #e2e8f0;
   border-bottom: 2px solid #3b4252;
 }
 
 /* Table body rows */
 .table tbody tr {
-  background-color: #111827; /* softer row background */
-  color: #e5e7eb;            /* off-white text */
+  background-color: #111827;
+  color: #e5e7eb; 
 }
 
 .table tbody tr:nth-child(even) {
-  background-color: #162032; /* alternating row */
+  background-color: #162032; 
 }
 
 /* Hover effect */
@@ -231,9 +229,9 @@ footer {
 }
 
 /* Progress bar colors (softer) */
-.progress-bar.bg-success { background-color: #10b981 !important; } /* emerald */
-.progress-bar.bg-warning { background-color: #facc15 !important; } /* amber */
-.progress-bar.bg-danger  { background-color: #ef4444 !important; } /* softer red */
+.progress-bar.bg-success { background-color: #10b981 !important; } 
+.progress-bar.bg-warning { background-color: #facc15 !important; }
+.progress-bar.bg-danger  { background-color: #ef4444 !important; } 
 
 /* Badges */
 .badge {

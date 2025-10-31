@@ -1,15 +1,5 @@
 # modules/scoring.py
-"""
-Upgraded Suspicion Scoring Engine
-- Additive IOC scoring with diminishing returns and explicit cap
-- YARA scoring using rule meta/tags severity when available
-- Heuristics (behavior/context) mapped from heuristics.component_scores if present
-- Optional reputation boost (reads data/ioc.json if available to infer confidence)
-- Backwards compatible output shape; added demo_mode for deterministic demo scores
-- Configurable weights via data/weights.json or passed-in dict
 
-Replace the existing modules/scoring.py file with this file.
-"""
 from typing import Dict, Any, List, Tuple, Optional
 import json
 import os
@@ -65,9 +55,6 @@ REPUTATION_CAP = 100
 IOC_DATA_PATH = os.path.join("data", "ioc.json")
 WEIGHTS_PATH_DEFAULT = os.path.join("data", "weights.json")
 
-# -----------------------
-# Helpers
-# -----------------------
 def _safe_load_json(path: str) -> Optional[Dict[str, Any]]:
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -115,7 +102,6 @@ def _normalize_analysis_blob(blob: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     iocs = analysis.get("ioc_matches") or analysis.get("ioc") or analysis.get("iocs") or []
     yaras = analysis.get("yara_matches") or analysis.get("yara") or analysis.get("yara_matches_list") or []
     heur = analysis.get("heuristics") or {}
-    # defensive
     iocs = _ensure_list(iocs)
     yaras = _ensure_list(yaras)
     if isinstance(heur, str):
@@ -125,14 +111,7 @@ def _normalize_analysis_blob(blob: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             heur = {}
     return {"ioc_matches": iocs, "yara_matches": yaras, "heuristics": heur}
 
-# -----------------------
-# Reputation helper (optional)
-# -----------------------
 def _build_ioc_conf_map(ioc_path: str = IOC_DATA_PATH) -> Dict[str, str]:
-    """
-    Load data/ioc.json (if available) and return mapping value -> confidence ("high","medium","low")
-    This supports giving small reputation boosts based on IOC source confidence.
-    """
     data = _safe_load_json(ioc_path)
     conf_map = {}
     if not data:
@@ -152,20 +131,7 @@ def _build_ioc_conf_map(ioc_path: str = IOC_DATA_PATH) -> Dict[str, str]:
             conf_map[str(val).strip().lower()] = conf or "unknown"
     return conf_map
 
-# -----------------------
-# Scoring functions
-# -----------------------
 def score_ioc(ioc_matches: Optional[List[Dict[str, Any]]]) -> Tuple[int, List[Dict[str, Any]]]:
-    """
-    Additive IOC scoring with diminishing returns.
-    Returns: (score 0..100, list of {msg, points, type, value})
-    Logic:
-      - For each distinct IOC match determine a base score from type (hash>filename>ip..)
-      - Apply confidence multiplier if present (match may include 'confidence' or we lookup from data/ioc.json)
-      - Sort bases desc, then add with diminishing factor f(i) = 1 / (1 + log(1+idx))
-      - Normalize with IOC_ADDITIVE_NORM, cap at IOC_CAP
-      - If there's any hash match, ensure score is at least 85 (unless confidence explicitly low)
-    """
     res_reasons = []
     if not ioc_matches:
         return 0, res_reasons
@@ -194,7 +160,6 @@ def score_ioc(ioc_matches: Optional[List[Dict[str, Any]]]) -> Tuple[int, List[Di
                 continue
             seen.add(key)
             base = _IOC_TYPE_SCORES.get(t, _IOC_TYPE_SCORES["default"])
-            # try infer confidence from provided field or ioc.json
             if not conf:
                 conf = conf_map.get(v_norm.lower())
             conf_mult = _CONF_MULT.get(conf or "unknown", 1.0)
@@ -243,10 +208,6 @@ def score_ioc(ioc_matches: Optional[List[Dict[str, Any]]]) -> Tuple[int, List[Di
     return score, res_reasons
 
 def score_yara(yara_matches: Optional[List[Dict[str, Any]]]) -> Tuple[int, List[Dict[str, Any]]]:
-    """
-    Score YARA matches based on meta.severity, tags or rule name heuristics.
-    Each rule contributes a points value; we sum and normalize by YARA_ADDITIVE_NORM.
-    """
     reasons = []
     if not yara_matches:
         return 0, []
@@ -302,16 +263,10 @@ def score_yara(yara_matches: Optional[List[Dict[str, Any]]]) -> Tuple[int, List[
     raw_score = min(YARA_CAP, (total / YARA_ADDITIVE_NORM) * 100.0)
     score = int(round(max(0.0, min(100.0, raw_score))))
 
-    # reasons
     reasons = [{"msg": f"YARA {p['rule']} (+{p['points']})", "points": p['points'], "rule": p['rule'], "tags": p['tags'], "meta": p['meta']} for p in per]
     return score, reasons
 
 def score_heuristics(heur: Optional[Dict[str, Any]]) -> Tuple[int, List[Dict[str, Any]]]:
-    """
-    Convert heuristics.report into a 0..100 behavior/context score and reasons list.
-    Uses heur['component_scores'] if present (entropy_component, filename_component, pe_component).
-    Fallback: use heur['suspicion_score'] if present.
-    """
     if not heur:
         return 0, []
 
@@ -367,11 +322,6 @@ def score_heuristics(heur: Optional[Dict[str, Any]]) -> Tuple[int, List[Dict[str
         return 0, []
 
 def score_reputation(ioc_matches: Optional[List[Dict[str, Any]]]) -> Tuple[int, List[Dict[str, Any]]]:
-    """
-    Optional small reputation score based on IOC confidences (data/ioc.json) or match fields.
-    Returns 0..100 (but will be weighted down in final combiner).
-    Logic: average confidence across matches (high->100, medium->60, low->20).
-    """
     if not ioc_matches:
         return 0, []
 
@@ -400,14 +350,7 @@ def score_reputation(ioc_matches: Optional[List[Dict[str, Any]]]) -> Tuple[int, 
     avg = total / count
     return int(round(max(0, min(100, avg)))), reasons
 
-# -----------------------
-# Demo deterministic helper
-# -----------------------
 def _demo_seeded_score(artifact_identifier: str):
-    """
-    Deterministic pseudo-random bucketed score for demo_mode.
-    artifact_identifier -> 0..100
-    """
     if not artifact_identifier:
         artifact_identifier = "demo"
     # use a stable hash -> seed
@@ -426,22 +369,11 @@ def _demo_seeded_score(artifact_identifier: str):
         # benign: 0-30
         return rnd.randint(0, 30)
 
-# -----------------------
-# Main combiner (replacement for compute_final_score)
-# -----------------------
 def compute_final_score(analysis_blob: Optional[Dict[str, Any]],
                         weights: Optional[Dict[str, float]] = None,
                         weights_path: str = WEIGHTS_PATH_DEFAULT,
                         demo_mode: bool = False,
                         demo_id: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Compute final 0..100 suspicion score.
-    - analysis_blob: artifact.analysis or artifact dict
-    - weights: optional dict overriding defaults; keys: ioc,yara,heuristics,reputation
-    - weights_path: optional path to JSON weights file
-    - demo_mode: if True, produce deterministic demo score based on demo_id; still returns breakdown & reasons
-    - demo_id: optional stable id used for deterministic demo seeding (artifact_id or sha)
-    """
     logger.info(f"[DEBUG scoring] Incoming analysis_blob keys: {list(analysis_blob.keys()) if isinstance(analysis_blob, dict) else type(analysis_blob)}")
 
     # Normalize blob early to avoid skipping nested analysis
@@ -592,14 +524,7 @@ if __name__ == "__main__":
                               demo_id=(blob.get("artifact_id") if isinstance(blob, dict) else None))
     print(json.dumps(out, indent=2))
 
-# ---- ADD: small wrapper for backward compatibility ----
 def compute_final_score_tuple(analysis_blob: Optional[Dict[str, Any]]) -> Tuple[int, Dict[str, Any]]:
-    """
-    Backwards-compatible wrapper:
-    - Calls the main compute_final_score(...) (which returns a dict)
-    - Returns (final_score_int, enriched_analysis_dict)
-    """
-    # call the main combiner (already defined above)
     try:
         out = compute_final_score(analysis_blob)
     except Exception:
@@ -625,4 +550,3 @@ def compute_final_score_tuple(analysis_blob: Optional[Dict[str, Any]]) -> Tuple[
         analysis["components"] = out.get("components")
 
     return final, analysis
-# ---- END wrapper ----

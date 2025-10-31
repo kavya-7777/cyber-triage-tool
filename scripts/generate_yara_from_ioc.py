@@ -41,8 +41,6 @@ if domains or ips:
 # hashes: try to add as hex bytes if length suitable (optional)
 hashes = ioc.get("hashes", [])
 for h in hashes:
-    # make a small rule for any hex-like substring — note: matching full sha256 as bytes requires binary snippet
-    # we'll create a hex-string match of the ASCII hex representation (cheap)
     if isinstance(h, str) and len(h) >= 16:
         name = h[:8]
         lines.append(f'rule CT_IOC_hash_{name} {{\n  meta: description = "IOC hash fragment"\n  strings:\n    $h = "{h}" ascii nocase\n  condition:\n    $h\n}}\n')
