@@ -1,15 +1,13 @@
-# 🧠 Cyber Triage Tool  
+# Cyber Triage Tool  
 ### _Streamlining Digital Evidence Analysis for Faster, Tamper-Evident Investigations_
 
 ---
 
-## 🚀 Overview  
-The **Cyber Triage Tool** is an automated digital forensics platform designed to **collect, analyze, and report digital evidence** efficiently.  
-It accelerates investigations through **automated triage**, **tamper-proof hashing**, and **court-ready reporting**, ensuring reliability, speed, and legal defensibility.
+The Cyber Triage Tool is an automated digital forensics platform designed to collect, analyze, and report digital evidence efficiently. It accelerates investigations through automated triage, tamper-proof hashing, and court-ready reporting, ensuring reliability, speed, and legal defensibility.
 
 ---
 
-## ⚙️ Tech Stack  
+## Tech Stack  
 
 |         Layer        |                   Technologies |
 |----------------------|----------------------------------------------------------------|
@@ -23,7 +21,7 @@ It accelerates investigations through **automated triage**, **tamper-proof hashi
 
 ---
 
-## 📂 Repository Structure
+## Repository Structure
 ```
 cyber-triage-tool/
 │
@@ -56,7 +54,7 @@ cyber-triage-tool/
 
 ---
 
-## 🧭 Setup & Run
+## Setup & Run
 ### 1. Clone Repository
 ```
 cd $env:USERPROFILE\Desktop
